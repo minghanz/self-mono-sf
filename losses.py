@@ -10,7 +10,10 @@ from utils.sceneflow_util import pixel2pts_ms, pts2pixel_ms, reconstructImg, rec
 from utils.monodepth_eval import compute_errors, compute_d1_all
 from models.modules_sceneflow import WarpingLayer_Flow
 
+from utils.sceneflow_util import pixel2pts_ms_and_depth ### needed by C3D loss
 
+import c3d
+import torchsnooper
 ###############################################
 ## Basic Module 
 ###############################################
@@ -82,6 +85,7 @@ def _adaptive_disocc_detection(flow):
         
     return disocc_map
 
+# @torchsnooper.snoop()
 def _adaptive_disocc_detection_disp(disp):
 
     # # init
@@ -154,6 +158,241 @@ def _depth2disp_kitti_K(depth, k_value):
 ## Loss function
 ###############################################
 
+class Loss_SceneFlow_SelfSup_C3D(nn.Module):
+    def __init__(self, args):
+        super(Loss_SceneFlow_SelfSup_C3D, self).__init__()
+                
+        self._weights = [4.0, 2.0, 1.0, 1.0, 1.0]
+        self._ssim_w = 0.85
+        self._disp_smooth_w = 0.1
+        self._sf_3d_pts = 0.2
+        self._sf_3d_sm = 200
+
+        ### c3d loss
+        self._sf_c3d = 1e-6
+
+        self.c3d_loss = c3d.C3DLoss(flow_mode=True)
+        f_input = "/home/minghanz/self-mono-sf/scripts/c3d_config.txt"
+        self.c3d_loss.parse_opts(f_input=f_input)
+
+    def depth_loss_left_img(self, disp_l, disp_r, img_l_aug, img_r_aug, ii):
+
+        img_r_warp = _generate_image_left(img_r_aug, disp_l)
+        left_occ = _adaptive_disocc_detection_disp(disp_r).detach()
+
+        ## Photometric loss
+        img_diff = (_elementwise_l1(img_l_aug, img_r_warp) * (1.0 - self._ssim_w) + _SSIM(img_l_aug, img_r_warp) * self._ssim_w).mean(dim=1, keepdim=True)        
+        loss_img = (img_diff[left_occ]).mean()
+        img_diff[~left_occ].detach_()
+
+        ## Disparities smoothness
+        loss_smooth = _smoothness_motion_2nd(disp_l, img_l_aug, beta=10.0).mean() / (2 ** ii)
+
+        return loss_img + self._disp_smooth_w * loss_smooth, left_occ
+
+
+    # @torchsnooper.snoop()
+    def sceneflow_loss(self, sf_f, sf_b, disp_l1, disp_l2, disp_occ_l1, disp_occ_l2, k_l1_aug, k_l2_aug, img_l1_aug, img_l2_aug, aug_size, ii, target_dict):
+
+        _, _, h_dp, w_dp = sf_f.size()
+        disp_l1 = disp_l1 * w_dp
+        disp_l2 = disp_l2 * w_dp
+
+        ## scale
+        local_scale = torch.zeros_like(aug_size)
+        local_scale[:, 0] = h_dp
+        local_scale[:, 1] = w_dp         
+
+        pts1, k1_scale, depth1 = pixel2pts_ms_and_depth(k_l1_aug, disp_l1, local_scale / aug_size)
+        pts2, k2_scale, depth2 = pixel2pts_ms_and_depth(k_l2_aug, disp_l2, local_scale / aug_size)
+
+        _, pts1_tf, coord1 = pts2pixel_ms(k1_scale, pts1, sf_f, [h_dp, w_dp])
+        _, pts2_tf, coord2 = pts2pixel_ms(k2_scale, pts2, sf_b, [h_dp, w_dp]) 
+
+        pts2_warp = reconstructPts(coord1, pts2)
+        pts1_warp = reconstructPts(coord2, pts1) 
+
+        flow_f = projectSceneFlow2Flow(k1_scale, sf_f, disp_l1)
+        flow_b = projectSceneFlow2Flow(k2_scale, sf_b, disp_l2)
+        occ_map_b = _adaptive_disocc_detection(flow_f).detach() * disp_occ_l2
+        occ_map_f = _adaptive_disocc_detection(flow_b).detach() * disp_occ_l1
+
+        ## Image reconstruction loss
+        img_l2_warp = reconstructImg(coord1, img_l2_aug)
+        img_l1_warp = reconstructImg(coord2, img_l1_aug)
+
+        img_diff1 = (_elementwise_l1(img_l1_aug, img_l2_warp) * (1.0 - self._ssim_w) + _SSIM(img_l1_aug, img_l2_warp) * self._ssim_w).mean(dim=1, keepdim=True)
+        img_diff2 = (_elementwise_l1(img_l2_aug, img_l1_warp) * (1.0 - self._ssim_w) + _SSIM(img_l2_aug, img_l1_warp) * self._ssim_w).mean(dim=1, keepdim=True)
+        loss_im1 = img_diff1[occ_map_f].mean()
+        loss_im2 = img_diff2[occ_map_b].mean()
+        img_diff1[~occ_map_f].detach_()
+        img_diff2[~occ_map_b].detach_()
+        loss_im = loss_im1 + loss_im2
+        
+        ## Point reconstruction Loss
+        pts_norm1 = torch.norm(pts1, p=2, dim=1, keepdim=True)
+        pts_norm2 = torch.norm(pts2, p=2, dim=1, keepdim=True)
+        pts_diff1 = _elementwise_epe(pts1_tf, pts2_warp).mean(dim=1, keepdim=True) / (pts_norm1 + 1e-8)
+        pts_diff2 = _elementwise_epe(pts2_tf, pts1_warp).mean(dim=1, keepdim=True) / (pts_norm2 + 1e-8)
+        loss_pts1 = pts_diff1[occ_map_f].mean()
+        loss_pts2 = pts_diff2[occ_map_b].mean()
+        pts_diff1[~occ_map_f].detach_()
+        pts_diff2[~occ_map_b].detach_()
+        loss_pts = loss_pts1 + loss_pts2
+
+        ############## C3D loss
+        torch.autograd.set_detect_anomaly(False)
+        if ii >= 1:
+            loss_c3d = torch.tensor(0)
+        else:
+            depth_img_dict_1 = {}
+            depth_img_dict_1["rgb"] = img_l1_aug
+            depth_img_dict_1["pred"] = depth1
+            depth_img_dict_1["pred_mask"] = target_dict["c3d_mask_l1_aug_scale_"+str(ii)]
+            depth_img_dict_1["gt"] = target_dict["c3d_depth_l1_aug_scale_"+str(ii)]
+            depth_img_dict_1["gt_mask"] = target_dict["c3d_mask_gt_l1_aug_scale_"+str(ii)]
+            depth_img_dict_2 = {}
+            depth_img_dict_2["rgb"] = img_l2_aug
+            depth_img_dict_2["pred"] = depth2
+            depth_img_dict_2["pred_mask"] = target_dict["c3d_mask_l2_aug_scale_"+str(ii)]
+            depth_img_dict_2["gt"] = target_dict["c3d_depth_l2_aug_scale_"+str(ii)]
+            depth_img_dict_2["gt_mask"] = target_dict["c3d_mask_gt_l2_aug_scale_"+str(ii)]
+            flow_dict_1to2 = {}
+            flow_dict_1to2["pred"] = sf_f
+
+            # print(depth1.shape)
+            # print(depth1.max())
+            # print(depth1.min())
+
+            # print(depth2.shape)
+            # print(depth2.max())
+            # print(depth2.min())
+
+            # print(sf_f.shape)
+            # print(sf_f.max())
+            # print(sf_f.min())
+
+            # print(sf_b.shape)
+            # print(sf_b.max())
+            # print(sf_b.min())
+            
+            flow_dict_1to2["mask"] = None
+            flow_dict_2to1 = {}
+            flow_dict_2to1["pred"] = sf_b
+            flow_dict_2to1["mask"] = None
+            cam_info = target_dict["c3d_cam_info_l_scale_"+str(ii)]
+            loss_c3d = self.c3d_loss(depth_img_dict_1=depth_img_dict_1, depth_img_dict_2=depth_img_dict_2, flow_dict_1to2=flow_dict_1to2, flow_dict_2to1=flow_dict_2to1, cam_info=cam_info)
+            loss_c3d = - loss_c3d
+
+        ## 3D motion smoothness loss
+        loss_3d_s = ( (_smoothness_motion_2nd(sf_f, img_l1_aug, beta=10.0) / (pts_norm1 + 1e-8)).mean() + (_smoothness_motion_2nd(sf_b, img_l2_aug, beta=10.0) / (pts_norm2 + 1e-8)).mean() ) / (2 ** ii)
+
+        ## Loss Summnation
+        sceneflow_loss = loss_im + self._sf_3d_pts * loss_pts + self._sf_3d_sm * loss_3d_s
+        
+        ### include c3d loss
+        loss_c3d_weight = self._sf_c3d * 8**ii              ### 8**ii is because the c3d loss scale is not consistent with differently scaled images
+        sceneflow_loss_c3d = sceneflow_loss + loss_c3d_weight * loss_c3d   
+
+        # print("ii: {}, sum: {:.4f}, loss_im: {:.4f}, loss_pts: {:.4f}, self._sf_3d_pts: {:.4f}, loss_pts_wted: {:.4f}, loss_3d_s: {:.4f}, self._sf_3d_sm: {:.4f}, loss_3d_s_wted: {:.4f}, loss_c3d: {:.4f}, loss_c3d_wt: {:.4f}, loss_c3d_wted: {:.4f}".format(
+        #         ii, sceneflow_loss, loss_im, loss_pts, self._sf_3d_pts, self._sf_3d_pts * loss_pts, loss_3d_s, self._sf_3d_sm, self._sf_3d_sm * loss_3d_s, loss_c3d, loss_c3d_weight, loss_c3d_weight * loss_c3d))
+
+        return sceneflow_loss, loss_im, loss_pts, loss_3d_s, loss_c3d, sceneflow_loss_c3d
+
+    def detaching_grad_of_outputs(self, output_dict):
+        
+        for ii in range(0, len(output_dict['flow_f'])):
+            output_dict['flow_f'][ii].detach_()
+            output_dict['flow_b'][ii].detach_()
+            output_dict['disp_l1'][ii].detach_()
+            output_dict['disp_l2'][ii].detach_()
+
+        return None
+
+    # @torchsnooper.snoop()
+    def forward(self, output_dict, target_dict):
+
+        loss_dict = {}
+
+        batch_size = target_dict['input_l1'].size(0)
+        loss_sf_sum = 0
+        loss_dp_sum = 0
+        loss_sf_2d = 0
+        loss_sf_3d = 0
+        loss_sf_sm = 0
+
+        ### c3d loss
+        loss_sf_c3d = 0
+        loss_sf_sum_c3d = 0
+        
+        k_l1_aug = target_dict['input_k_l1_aug']
+        k_l2_aug = target_dict['input_k_l2_aug']
+        aug_size = target_dict['aug_size']
+
+        disp_r1_dict = output_dict['output_dict_r']['disp_l1']
+        disp_r2_dict = output_dict['output_dict_r']['disp_l2']
+
+        for ii, (sf_f, sf_b, disp_l1, disp_l2, disp_r1, disp_r2) in enumerate(zip(output_dict['flow_f'], output_dict['flow_b'], output_dict['disp_l1'], output_dict['disp_l2'], disp_r1_dict, disp_r2_dict)):
+
+            assert(sf_f.size()[2:4] == sf_b.size()[2:4])
+            assert(sf_f.size()[2:4] == disp_l1.size()[2:4])
+            assert(sf_f.size()[2:4] == disp_l2.size()[2:4])
+            
+            ## For image reconstruction loss
+            img_l1_aug = interpolate2d_as(target_dict["input_l1_aug"], sf_f)
+            img_l2_aug = interpolate2d_as(target_dict["input_l2_aug"], sf_b)
+            img_r1_aug = interpolate2d_as(target_dict["input_r1_aug"], sf_f)
+            img_r2_aug = interpolate2d_as(target_dict["input_r2_aug"], sf_b)
+
+            ## Disp Loss
+            loss_disp_l1, disp_occ_l1 = self.depth_loss_left_img(disp_l1, disp_r1, img_l1_aug, img_r1_aug, ii)
+            loss_disp_l2, disp_occ_l2 = self.depth_loss_left_img(disp_l2, disp_r2, img_l2_aug, img_r2_aug, ii)
+            loss_dp_sum = loss_dp_sum + (loss_disp_l1 + loss_disp_l2) * self._weights[ii]
+
+
+            ## Sceneflow Loss           
+            loss_sceneflow, loss_im, loss_pts, loss_3d_s, loss_c3d, loss_sceneflow_c3d = self.sceneflow_loss(sf_f, sf_b, 
+                                                                            disp_l1, disp_l2,
+                                                                            disp_occ_l1, disp_occ_l2,
+                                                                            k_l1_aug, k_l2_aug,
+                                                                            img_l1_aug, img_l2_aug, 
+                                                                            aug_size, ii, target_dict)
+
+            loss_sf_sum = loss_sf_sum + loss_sceneflow * self._weights[ii]            
+            loss_sf_2d = loss_sf_2d + loss_im            
+            loss_sf_3d = loss_sf_3d + loss_pts
+            loss_sf_sm = loss_sf_sm + loss_3d_s
+
+            ### c3d loss
+            loss_sf_c3d = loss_sf_c3d + loss_c3d
+            loss_sf_sum_c3d = loss_sf_sum_c3d + loss_sceneflow_c3d * self._weights[ii]
+
+        # finding weight
+        f_loss = loss_sf_sum.detach()
+        d_loss = loss_dp_sum.detach()
+        max_val = torch.max(f_loss, d_loss)
+        f_weight = max_val / f_loss
+        d_weight = max_val / d_loss
+
+        total_loss = loss_sf_sum * f_weight + loss_dp_sum * d_weight
+
+        loss_dict = {}
+        loss_dict["dp"] = loss_dp_sum
+        loss_dict["sf"] = loss_sf_sum
+        loss_dict["s_2"] = loss_sf_2d
+        loss_dict["s_3"] = loss_sf_3d
+        loss_dict["s_3s"] = loss_sf_sm
+        loss_dict["total_loss"] = total_loss
+
+        ### c3d loss
+        total_loss_w_c3d = loss_sf_sum_c3d * f_weight + loss_dp_sum * d_weight
+        loss_dict["s_c3d"] = loss_sf_c3d
+        loss_dict["t_loss_w_c3d"] = total_loss_w_c3d
+
+        self.detaching_grad_of_outputs(output_dict['output_dict_r'])
+
+        return loss_dict
+
 class Loss_SceneFlow_SelfSup(nn.Module):
     def __init__(self, args):
         super(Loss_SceneFlow_SelfSup, self).__init__()
@@ -180,6 +419,7 @@ class Loss_SceneFlow_SelfSup(nn.Module):
         return loss_img + self._disp_smooth_w * loss_smooth, left_occ
 
 
+    # @torchsnooper.snoop()
     def sceneflow_loss(self, sf_f, sf_b, disp_l1, disp_l2, disp_occ_l1, disp_occ_l2, k_l1_aug, k_l2_aug, img_l1_aug, img_l2_aug, aug_size, ii):
 
         _, _, h_dp, w_dp = sf_f.size()
@@ -246,6 +486,7 @@ class Loss_SceneFlow_SelfSup(nn.Module):
 
         return None
 
+    # @torchsnooper.snoop()
     def forward(self, output_dict, target_dict):
 
         loss_dict = {}

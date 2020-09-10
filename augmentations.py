@@ -8,6 +8,8 @@ import numpy as np
 from utils.interpolation import interpolate2d
 from utils.interpolation import Interp2, Meshgrid
 
+import c3d
+import torchsnooper
 
 class PhotometricAugmentation(nn.Module):
     def __init__(self):
@@ -191,6 +193,7 @@ class Augmentation_ScaleCrop(nn.Module):
 
         return invalid
 
+    # @torchsnooper.snoop()
     def calculate_tform_and_grids(self, img_size, resize, params):
 
         intm_scale, _, tx, ty = self.decompose_params(params)
@@ -203,8 +206,12 @@ class Augmentation_ScaleCrop(nn.Module):
 
         ## Coord of the resized image
         grid_ww, grid_hh = self._meshgrid(resize[1], resize[0])
-        grid_ww = (grid_ww - (resize[1] - 1.0) / 2.0).unsqueeze(0).cuda()
-        grid_hh = (grid_hh - (resize[0] - 1.0) / 2.0).unsqueeze(0).cuda()
+        if tx.device.type != "cpu":     # convert to gpu only when this module is on gpu
+            grid_ww = (grid_ww - (resize[1] - 1.0) / 2.0).unsqueeze(0).cuda()
+            grid_hh = (grid_hh - (resize[0] - 1.0) / 2.0).unsqueeze(0).cuda()
+        else:
+            grid_ww = (grid_ww - (resize[1] - 1.0) / 2.0).unsqueeze(0)
+            grid_hh = (grid_hh - (resize[0] - 1.0) / 2.0).unsqueeze(0)
         grid_pts = torch.cat([grid_ww, grid_hh, torch.ones_like(grid_hh)], dim=0).unsqueeze(0).expand(self._batch, -1, -1, -1)
 
         ## 1st - scale_tform -> to intermediate image
@@ -258,6 +265,7 @@ class Augmentation_ScaleCrop(nn.Module):
 
         return params
 
+    # @torchsnooper.snoop()
     def augment_intrinsic_matrices(self, intrinsics, num_splits, img_size, resize, params):
 
         ### Finding the starting pt in the Original Image
@@ -272,8 +280,12 @@ class Augmentation_ScaleCrop(nn.Module):
 
         ## Coord of the resized image
         pt_o = torch.zeros([1, 1]).float()
-        grid_ww = (pt_o - (resize[1] - 1.0) / 2.0).unsqueeze(0).cuda()
-        grid_hh = (pt_o - (resize[0] - 1.0) / 2.0).unsqueeze(0).cuda()
+        if tx.device.type != "cpu":     # convert to gpu only when this module is on gpu
+            grid_ww = (pt_o - (resize[1] - 1.0) / 2.0).unsqueeze(0).cuda()
+            grid_hh = (pt_o - (resize[0] - 1.0) / 2.0).unsqueeze(0).cuda()
+        else:
+            grid_ww = (pt_o - (resize[1] - 1.0) / 2.0).unsqueeze(0)
+            grid_hh = (pt_o - (resize[0] - 1.0) / 2.0).unsqueeze(0)
         grid_pts = torch.cat([grid_ww, grid_hh, torch.ones_like(grid_hh)], dim=0).unsqueeze(0).expand(self._batch, -1, -1, -1)
 
         ## 1st - scale_tform -> to intermediate image
@@ -303,6 +315,273 @@ class Augmentation_ScaleCrop(nn.Module):
         return intrinsics
 
 
+class Augmentation_SceneFlow_C3D(Augmentation_ScaleCrop):
+    def __init__(self, args, photometric=True, trans=0.07, scale=[0.93, 1.0], resize=[256, 832]):
+        super(Augmentation_SceneFlow_C3D, self).__init__(
+            args, 
+            photometric=photometric, 
+            trans=trans, 
+            scale=scale, 
+            resize=resize)
+
+        data_root = "/mnt/storage8t/minghanz/Datasets/KITTI_data/kitti_data"
+        self.c3d_loader = c3d.C3DLoader(data_root=data_root)
+
+        ### c3d timer
+        # self.timer = c3d.utils_general.Timing()
+
+    # @torchsnooper.snoop()
+    def augment_intrinsic_matrices(self, intrinsics, num_splits, img_size, resize, params):
+
+        ### Finding the starting pt in the Original Image
+
+        intm_scale, _, tx, ty = self.decompose_params(params)
+
+        ## Intermediate image: finding scale from "Resize" to "Intermediate Image"
+        intm_size_h = torch.floor(img_size[0] * intm_scale)
+        intm_size_w = torch.floor(img_size[1] * intm_scale)
+        scale_x = intm_size_w / resize[1]
+        scale_y = intm_size_h / resize[0]
+
+        ## Coord of the resized image
+        pt_o = torch.zeros([1, 1]).float()
+        if tx.device.type != "cpu":     # convert to gpu only when this module is on gpu
+            grid_ww = (pt_o - (resize[1] - 1.0) / 2.0).unsqueeze(0).cuda()
+            grid_hh = (pt_o - (resize[0] - 1.0) / 2.0).unsqueeze(0).cuda()
+        else:
+            grid_ww = (pt_o - (resize[1] - 1.0) / 2.0).unsqueeze(0)
+            grid_hh = (pt_o - (resize[0] - 1.0) / 2.0).unsqueeze(0)
+
+        grid_pts = torch.cat([grid_ww, grid_hh, torch.ones_like(grid_hh)], dim=0).unsqueeze(0).expand(self._batch, -1, -1, -1)
+
+        ## 1st - scale_tform -> to intermediate image
+        scale_tform = self._identity(self._batch, self._device)
+        scale_tform[:, 0, 0] = scale_x[:, 0]
+        scale_tform[:, 1, 1] = scale_y[:, 0]
+        pts_tform = torch.matmul(scale_tform, grid_pts.view(self._batch, 3, -1))
+
+        ## 2st - trans and rotate -> to original image (each pixel contains the coordinates in the original images)
+        tr_tform = self._identity(self._batch, self._device)
+        tr_tform[:, 0, 2] = tx[:, 0]
+        tr_tform[:, 1, 2] = ty[:, 0]
+        pts_tform = torch.matmul(tr_tform, pts_tform)
+        str_p_ww = pts_tform[:, 0, :] + torch.ones_like(pts_tform[:, 0, :]) * float(img_size[1]) * 0.5 
+        str_p_hh = pts_tform[:, 1, :] + torch.ones_like(pts_tform[:, 1, :]) * float(img_size[0]) * 0.5
+
+        ## Cropping
+        intrinsics[:, :, 0, 2] -= str_p_ww[:, 0:1].expand(-1, num_splits)
+        intrinsics[:, :, 1, 2] -= str_p_hh[:, 0:1].expand(-1, num_splits)
+
+        ## Scaling        
+        intrinsics[:, :, 0, 0] = intrinsics[:, :, 0, 0] / scale_x
+        intrinsics[:, :, 1, 1] = intrinsics[:, :, 1, 1] / scale_y
+        intrinsics[:, :, 0, 2] = intrinsics[:, :, 0, 2] / scale_x
+        intrinsics[:, :, 1, 2] = intrinsics[:, :, 1, 2] / scale_y
+
+        return intrinsics, str_p_ww, str_p_hh, intm_size_w, intm_size_h
+
+    def forward_c3d(self, example_dict):
+
+        im_l1 = example_dict["input_l1"]
+        k_l1 = example_dict["input_k_l1"].clone()
+        k_l2 = example_dict["input_k_l2"].clone()
+        k_r1 = example_dict["input_k_r1"].clone()
+        k_r2 = example_dict["input_k_r2"].clone()
+
+        self._batch, _, h_orig, w_orig = im_l1.size()
+        self._device = im_l1.device
+
+        # self.timer.log("original", 0)
+        ################## c3d v2
+        cam_ops = example_dict["c3d_cam_ops"]
+
+        ## Finding out augmentation parameters
+        params = self.find_aug_params([h_orig, w_orig], self._resize)
+
+        ## Augment intrinsic matrix         
+        k_list = [k_l1.unsqueeze(1), k_l2.unsqueeze(1), k_r1.unsqueeze(1), k_r2.unsqueeze(1)]
+        num_splits = len(k_list)
+        intrinsics = torch.cat(k_list, dim=1)
+        intrinsics, str_p_ww, str_p_hh, intm_size_w, intm_size_h = self.augment_intrinsic_matrices(intrinsics, num_splits, [h_orig, w_orig], self._resize, params)
+
+        # self.timer.log("load l1", 0, True)
+        ################## c3d v2
+        for ib in range(self._batch):
+            cam_ops[ib].append(c3d.utils.CamCrop(x_start=str_p_ww[ib,0], y_start=str_p_hh[ib,0], x_size=intm_size_w[ib,0], y_size=intm_size_h[ib,0]))
+            cam_ops[ib].append(c3d.utils.CamScale(new_height=self._resize[0], new_width=self._resize[1], align_corner=True))
+
+        im_l1_fname = example_dict["c3d_l1_fname"]
+        cam_info_l1, depth_dict_l1, cache_list_l1 = self.c3d_loader.load(im_l1_fname, cam_ops)
+        cache_inex_init_l = [ cache["inex_init"] for cache in cache_list_l1 ]
+        cache_inex_final_l = [ cache["inex_final"] for cache in cache_list_l1 ]
+        cache_lidar_1 = [ cache["lidar"] for cache in cache_list_l1 ]
+
+        # self.timer.log("load l2", 0, True)
+
+        im_l2_fname = example_dict["c3d_l2_fname"]
+        depth_dict_l2, cache_list_l2 = self.c3d_loader.load_known_inex(im_l2_fname, cam_ops, cache_inex_init_l, cache_inex_final_l)
+        cache_lidar_2 = [cache["lidar"] for cache in cache_list_l2]
+
+        # im_r1_fname = example_dict["c3d_r1_fname"]
+        # cam_info_r1, depth_dict_r1, cache_list_r1 = self.c3d_loader.load(im_r1_fname, cam_ops, cache_lidar_1)
+        # cache_inex_init_r = [ cache["inex_init"] for cache in cache_list_r1 ]
+        # cache_inex_final_r = [ cache["inex_final"] for cache in cache_list_r1 ]
+
+
+        # im_r2_fname = example_dict["c3d_r2_fname"]
+        # depth_dict_r2, cache_list_r2 = self.c3d_loader.load_known_inex(im_r2_fname, cam_ops, cache_inex_init_r, cache_inex_final_r, cache_lidar_2)
+
+        # self.timer.log("to_dict l1 l2", 0, True)
+
+        example_dict["c3d_depth_l1_aug_scale_0"] = depth_dict_l1["depth"]
+        example_dict["c3d_mask_l1_aug_scale_0"] = depth_dict_l1["mask"]
+        example_dict["c3d_mask_gt_l1_aug_scale_0"] = depth_dict_l1["mask_gt"]
+
+        example_dict["c3d_depth_l2_aug_scale_0"] = depth_dict_l2["depth"]
+        example_dict["c3d_mask_l2_aug_scale_0"] = depth_dict_l2["mask"]
+        example_dict["c3d_mask_gt_l2_aug_scale_0"] = depth_dict_l2["mask_gt"]
+
+        # example_dict["c3d_depth_r1_aug_scale_0"] = depth_dict_r1["depth"]
+        # example_dict["c3d_mask_r1_aug_scale_0"] = depth_dict_r1["mask"]
+        # example_dict["c3d_mask_gt_r1_aug_scale_0"] = depth_dict_r1["mask_gt"]
+
+        # example_dict["c3d_depth_r2_aug_scale_0"] = depth_dict_r2["depth"]
+        # example_dict["c3d_mask_r2_aug_scale_0"] = depth_dict_r2["mask"]
+        # example_dict["c3d_mask_gt_r2_aug_scale_0"] = depth_dict_r2["mask_gt"]
+
+        example_dict["c3d_cam_info_l_scale_0"] = cam_info_l1
+
+        # self.timer.log("prepare scaled", 0, True)
+
+        ### for smaller scales [16, 52], [32, 104], [64, 208], [128, 416], [256, 832]
+        new_height = self._resize[0]
+        new_width = self._resize[1]
+        mask_l1_float = example_dict["c3d_mask_l1_aug_scale_0"].float()
+        mask_l2_float = example_dict["c3d_mask_l2_aug_scale_0"].float()
+
+        for ii in range(1,1):
+            # self.timer.log("scaled %d"%ii, 0, True)
+            new_width = int(new_width * 0.5)
+            new_height = int(new_height * 0.5)
+            for ib in range(self._batch):
+                cam_ops[ib].append(c3d.utils.CamScale(new_height=new_height, new_width=new_width, align_corner=True))
+            
+            cam_info_l1, depth_dict_l1, cache_list_l1 = self.c3d_loader.load(im_l1_fname, cam_ops, cache_lidar_1, no_mask=True)
+            cache_inex_init_l = [ cache["inex_init"] for cache in cache_list_l1 ]
+            cache_inex_final_l = [ cache["inex_final"] for cache in cache_list_l1 ]
+
+            depth_dict_l2, cache_list_l2 = self.c3d_loader.load_known_inex(im_l2_fname, cam_ops, cache_inex_init_l, cache_inex_final_l, cache_lidar_2, no_mask=True)
+
+            example_dict["c3d_depth_l1_aug_scale_"+str(ii)] = depth_dict_l1["depth"]
+            example_dict["c3d_mask_l1_aug_scale_"+str(ii)] = torch.nn.functional.interpolate(mask_l1_float, size=(new_height, new_width), mode="nearest") > 0.5
+            example_dict["c3d_mask_gt_l1_aug_scale_"+str(ii)] = depth_dict_l1["mask_gt"]
+
+            example_dict["c3d_depth_l2_aug_scale_"+str(ii)] = depth_dict_l2["depth"]
+            example_dict["c3d_mask_l2_aug_scale_"+str(ii)] = torch.nn.functional.interpolate(mask_l2_float, size=(new_height, new_width), mode="nearest") > 0.5
+            example_dict["c3d_mask_gt_l2_aug_scale_"+str(ii)] = depth_dict_l2["mask_gt"]
+
+            example_dict["c3d_cam_info_l_scale_"+str(ii)] = cam_info_l1
+
+        example_dict["aug_params"] = params
+        return example_dict
+
+    def forward_all(self, example_dict):
+        example_dict = self.forward_c3d(example_dict)
+        example_dict = self.forward(example_dict)
+        return example_dict
+
+    # @torchsnooper.snoop()
+    def forward(self, example_dict):
+
+        # --------------------------------------------------------
+        # Param init
+        # --------------------------------------------------------
+        im_l1 = example_dict["input_l1"]
+        im_l2 = example_dict["input_l2"]
+        im_r1 = example_dict["input_r1"]
+        im_r2 = example_dict["input_r2"]
+        k_l1 = example_dict["input_k_l1"].clone()
+        k_l2 = example_dict["input_k_l2"].clone()
+        k_r1 = example_dict["input_k_r1"].clone()
+        k_r2 = example_dict["input_k_r2"].clone()
+        self._batch, _, h_orig, w_orig = im_l1.size()
+        self._device = im_l1.device
+
+        # self.timer.log("original", 0)
+
+        ## Finding out augmentation parameters
+        if "aug_params" in example_dict:
+            params = example_dict["aug_params"]
+        else:
+            params = self.find_aug_params([h_orig, w_orig], self._resize)
+        coords = self.calculate_tform_and_grids([h_orig, w_orig], self._resize, params)
+        params_scale, _, _, _ = self.decompose_params(params)
+
+        ## Augment images
+        im_l1 = tf.grid_sample(im_l1, coords)
+        im_l2 = tf.grid_sample(im_l2, coords)
+        im_r1 = tf.grid_sample(im_r1, coords)        
+        im_r2 = tf.grid_sample(im_r2, coords)
+
+        ## Augment intrinsic matrix         
+        k_list = [k_l1.unsqueeze(1), k_l2.unsqueeze(1), k_r1.unsqueeze(1), k_r2.unsqueeze(1)]
+        num_splits = len(k_list)
+        intrinsics = torch.cat(k_list, dim=1)
+        intrinsics, str_p_ww, str_p_hh, intm_size_w, intm_size_h = self.augment_intrinsic_matrices(intrinsics, num_splits, [h_orig, w_orig], self._resize, params)
+        k_l1, k_l2, k_r1, k_r2 = torch.chunk(intrinsics, num_splits, dim=1)
+        k_l1 = k_l1.squeeze(1)
+        k_l2 = k_l2.squeeze(1)
+        k_r1 = k_r1.squeeze(1)
+        k_r2 = k_r2.squeeze(1)
+
+
+        # self.timer.log("photometric aug", 0, True)
+        ################################ c3d augmentation
+        ### 1. Image cropping and scaling only affect intrinsic matrix. Does not affect point cloud. 
+        ###    Just remember to project the point clouds to depth image after all intrinsic matrix transformation
+        ### 2. Also generate CamInfo here (after all intrinsic matrix transformation)
+        #################################################
+
+        if self._photometric and torch.rand(1) > 0.5:
+            im_l1, im_l2, im_r1, im_r2 = self._photo_augmentation(im_l1, im_l2, im_r1, im_r2)
+
+        # self.timer.log("to_dict", 0, True)
+
+        ## construct updated dictionaries        
+        example_dict["input_coords"] = coords
+        example_dict["input_aug_scale"] = params_scale
+        
+        example_dict["input_l1_aug"] = im_l1
+        example_dict["input_l2_aug"] = im_l2
+        example_dict["input_r1_aug"] = im_r1
+        example_dict["input_r2_aug"] = im_r2
+        
+        example_dict["input_k_l1_aug"] = k_l1
+        example_dict["input_k_l2_aug"] = k_l2
+        example_dict["input_k_r1_aug"] = k_r1
+        example_dict["input_k_r2_aug"] = k_r2
+    
+        k_l1_flip = k_l1.clone()
+        k_l2_flip = k_l2.clone()
+        k_r1_flip = k_r1.clone()
+        k_r2_flip = k_r2.clone()
+        k_l1_flip[:, 0, 2] = im_l1.size(3) - k_l1_flip[:, 0, 2]
+        k_l2_flip[:, 0, 2] = im_l2.size(3) - k_l2_flip[:, 0, 2]
+        k_r1_flip[:, 0, 2] = im_r1.size(3) - k_r1_flip[:, 0, 2]
+        k_r2_flip[:, 0, 2] = im_r2.size(3) - k_r2_flip[:, 0, 2]
+        example_dict["input_k_l1_flip_aug"] = k_l1_flip
+        example_dict["input_k_l2_flip_aug"] = k_l2_flip
+        example_dict["input_k_r1_flip_aug"] = k_r1_flip
+        example_dict["input_k_r2_flip_aug"] = k_r2_flip
+
+        aug_size = torch.zeros_like(example_dict["input_size"])
+        aug_size[:, 0] = self._resize[0]
+        aug_size[:, 1] = self._resize[1]
+        example_dict["aug_size"] = aug_size
+
+        return example_dict
+
+
 class Augmentation_SceneFlow(Augmentation_ScaleCrop):
     def __init__(self, args, photometric=True, trans=0.07, scale=[0.93, 1.0], resize=[256, 832]):
         super(Augmentation_SceneFlow, self).__init__(
@@ -313,6 +592,7 @@ class Augmentation_SceneFlow(Augmentation_ScaleCrop):
             resize=resize)
 
 
+    # @torchsnooper.snoop()
     def forward(self, example_dict):
 
         # --------------------------------------------------------

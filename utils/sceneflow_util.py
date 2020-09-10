@@ -86,6 +86,14 @@ def pixel2pts_ms(intrinsic, output_disp, rel_scale):
 
     return pts, intrinsic_dp_s
 
+### added to use C3D loss
+def pixel2pts_ms_and_depth(intrinsic, output_disp, rel_scale):
+    # pixel2pts
+    intrinsic_dp_s = intrinsic_scale(intrinsic, rel_scale[:,0], rel_scale[:,1])
+    output_depth = disp2depth_kitti(output_disp, intrinsic_dp_s[:, 0, 0])
+    pts, _ = pixel2pts(intrinsic_dp_s, output_depth)
+
+    return pts, intrinsic_dp_s, output_depth
 
 def pts2pixel_ms(intrinsic, pts, output_sf, disp_size):
 

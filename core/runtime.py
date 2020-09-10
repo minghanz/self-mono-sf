@@ -21,6 +21,8 @@ import os
 # for tensorboardX
 from torch.utils.tensorboard import SummaryWriter
 
+import c3d
+
 # --------------------------------------------------------------------------------
 # Exponential moving average smoothing factor for speed estimates
 # Ranges from 0 (average speed) to 1 (current/instantaneous speed) [default: 0.3].
@@ -128,26 +130,58 @@ class TrainingEpoch:
         self._add_progress_stats = add_progress_stats
         self._tbwriter = tbwriter
 
+        # self.timer = c3d.utils_general.Timing()
     def _step(self, example_dict, model_and_loss, optimizer):
+        # self.timer.log("step start", 0, True)
 
         # Get input and target tensor keys
         input_keys = list(filter(lambda x: "input" in x, example_dict.keys()))
         target_keys = list(filter(lambda x: "target" in x, example_dict.keys()))
         tensor_keys = input_keys + target_keys
-
+        
+        ### c3d: for cam_ops and names
+        c3d_keys = list(filter(lambda x: "c3d" in x, example_dict.keys()))
         # Possibly transfer to Cuda
         if self._args.cuda:
             for key, value in example_dict.items():
-                if key in tensor_keys:
-                    example_dict[key] = value.cuda(non_blocking=True)
+                # if key in tensor_keys:
+                #     example_dict[key] = value.cuda(non_blocking=True)
+                # elif key in c3d_keys:
+                #     if isinstance(value, list):     ### c3d: for cam_ops and names
+                #         continue
+                #     if isinstance(value, torch.Tensor):     ### For tensor, non_blocking argument can be used. For nn.Module, it cannot.
+                #         example_dict[key] = value.cuda(non_blocking=True)
+                #     else:
+                #         example_dict[key] = value.cuda()
 
+                if isinstance(value, list):     ### c3d: for cam_ops and names
+                    continue
+                if isinstance(value, torch.Tensor):
+                    example_dict[key] = value.cuda(non_blocking=True)
+                else:
+                    example_dict[key] = value.cuda()
+
+        # self.timer.log("augmentation", 0, True)
         # Optionally perform augmentations
         if self._augmentation is not None:
             with torch.no_grad():
                 example_dict = self._augmentation(example_dict)
+        
+        
+        # self.timer.log("to gpu and grad", 0, True)
 
         # Convert inputs/targets to variables that require gradients
         for key, tensor in example_dict.items():
+            if isinstance(tensor, list):     ### c3d: for cam_ops and names
+                continue
+            if self._args.cuda:
+                if isinstance(tensor, torch.Tensor):
+                    tensor = tensor.cuda(non_blocking=True)
+                else:
+                    tensor = tensor.cuda()
+
+            example_dict[key] = tensor.requires_grad_(False)
+
             if key in input_keys:
                 example_dict[key] = tensor.requires_grad_(True)
             elif key in target_keys:
@@ -156,6 +190,8 @@ class TrainingEpoch:
         # Reset gradients
         optimizer.zero_grad()
 
+        # self.timer.log("model_and_loss", 0, True)
+
         # Run forward pass to get losses and outputs.
         loss_dict, output_dict = model_and_loss(example_dict)
 
@@ -163,10 +199,13 @@ class TrainingEpoch:
         training_loss = loss_dict[self._args.training_key]
         assert (not np.isnan(training_loss.item())), "training_loss is NaN"
 
+        # self.timer.log("backward", 0, True)
+
         # Back propagation
         training_loss.backward()
         optimizer.step()
 
+        # self.timer.log("optimize step", 0, True)
         # Return success flag, loss and output dictionary
         return loss_dict, output_dict
 
@@ -189,10 +228,16 @@ class TrainingEpoch:
         with create_progressbar(**progressbar_args) as progress:
             for example_dict in progress:
 
+                # self.timer.log("before step start", 0, True)
                 # perform step
                 loss_dict_per_step, output_dict = self._step(example_dict, model_and_loss, optimizer)
+
+                # self.timer.log("tensor2float_dict", 0, True)
+
                 # convert
                 loss_dict_per_step = tensor2float_dict(loss_dict_per_step)
+
+                # self.timer.log("MovingAverage", 0, True)
 
                 # Possibly initialize moving averages and  Add moving averages
                 if moving_averages_dict is None:
@@ -203,6 +248,8 @@ class TrainingEpoch:
                 for key, loss in loss_dict_per_step.items():
                     moving_averages_dict[key].add_average(loss, addcount=self._args.batch_size)
 
+                # self.timer.log("progress_stats", 0, True)
+
                 # view statistics in progress bar
                 progress_stats = format_moving_averages_as_progress_dict(
                     moving_averages_dict=moving_averages_dict,
@@ -210,6 +257,7 @@ class TrainingEpoch:
 
                 progress.set_postfix(progress_stats)
 
+                # self.timer.log("end of a loop", 0, True)
 
         # Return loss and output dictionary
         ema_loss_dict = { key: ma.mean() for key, ma in moving_averages_dict.items() }
@@ -316,6 +364,9 @@ class EvaluationEpoch:
         input_keys = list(filter(lambda x: "input" in x, example_dict.keys()))
         target_keys = list(filter(lambda x: "target" in x, example_dict.keys()))
         tensor_keys = input_keys + target_keys
+        
+        ### c3d: for cam_ops and names
+        c3d_keys = list(filter(lambda x: "c3d" in x, example_dict.keys()))
 
         # Possibly transfer to Cuda
         if self._args.cuda:
@@ -323,9 +374,27 @@ class EvaluationEpoch:
                 if key in tensor_keys:
                     example_dict[key] = value.cuda(non_blocking=True)
 
+                elif key in c3d_keys:
+                    if isinstance(value, list):     ### c3d: for cam_ops and names
+                        continue
+                    if isinstance(value, torch.Tensor):
+                        example_dict[key] = value.cuda(non_blocking=True)
+                    else:
+                        example_dict[key] = value.cuda()
+
         # Optionally perform augmentations
         if self._augmentation is not None:
             example_dict = self._augmentation(example_dict)
+
+        # Convert inputs/targets to variables that require gradients
+        for key, tensor in example_dict.items():
+            if isinstance(tensor, list):     ### c3d: for cam_ops and names
+                continue
+            if self._args.cuda:
+                if isinstance(tensor, torch.Tensor):
+                    example_dict[key] = tensor.cuda(non_blocking=True)
+                else:
+                    example_dict[key] = tensor.cuda()
 
         # Run forward pass to get losses and outputs.
         loss_dict, output_dict = model_and_loss(example_dict)

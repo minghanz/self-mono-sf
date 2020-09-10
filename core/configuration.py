@@ -17,6 +17,8 @@ from core import logger, tools
 from torch.utils.data.sampler import RandomSampler
 from datasets.custom_batchsampler import CustomBatchSampler
 
+from datasets.collate import default_collate_with_caminfo, default_collate_with_camops_caminfo    ## modified to adapt to CamInfo batching
+
 # ---------------------------------------------------
 # Class that contains both the network model and loss
 # ---------------------------------------------------
@@ -49,6 +51,8 @@ class ModelAndLoss(nn.Module):
         # -------------------------------------
         # Run forward pass
         # -------------------------------------
+        # with torch.autograd.detect_anomaly():
+        torch.autograd.set_detect_anomaly(True)
         output_dict = self._model(example_dict)
 
         # -------------------------------------
@@ -82,8 +86,9 @@ def configure_runtime_augmentations(args):
             kwargs["args"] = args
             training_augmentation = tools.instance_from_kwargs(
                 args.training_augmentation_class, kwargs)
-            if args.cuda:
-                training_augmentation = training_augmentation.cuda()
+            ### if putting augmentation inside the dataset, then do not transform the nn.Module to GPU
+            # if args.cuda:
+            #     training_augmentation = training_augmentation.cuda()
 
         else:
             logging.info("training_augmentation: None")
@@ -99,8 +104,8 @@ def configure_runtime_augmentations(args):
             kwargs["args"] = args
             validation_augmentation = tools.instance_from_kwargs(
                 args.validation_augmentation_class, kwargs)
-            if args.cuda:
-                validation_augmentation = validation_augmentation.cuda()
+            # if args.cuda:
+            #     validation_augmentation = validation_augmentation.cuda()
 
         else:
             logging.info("validation_augmentation: None")
@@ -351,7 +356,8 @@ def configure_checkpoint_saver(args, model_and_loss):
 # -------------------------------------------------------------------------------------------------
 # Configure data loading
 # -------------------------------------------------------------------------------------------------
-def configure_data_loaders(args):
+def configure_data_loaders(args, training_augmentation, validation_augmentation):
+# def configure_data_loaders(args):
     with logger.LoggingBlock("Datasets", emph=True):
 
         def _sizes_to_str(value):
@@ -366,7 +372,12 @@ def configure_data_loaders(args):
                 for key, value in sorted(example_dict.items()):
                     if key in ["index", "basename"]:  # no need to display these
                         continue
-                    if isinstance(value, str):
+                    if isinstance(value, list):     # for non-batched items (c3d: cam_ops, names)
+                        if len(value) > 0:
+                            logging.info("{}: {} of {}".format(key, len(value), type(value[0])))
+                        else:
+                            logging.info("{}: length {} list".format(key, len(value)) )
+                    elif isinstance(value, str):
                         logging.info("{}: {}".format(key, value))
                     else:
                         logging.info("%s: %s" % (key, _sizes_to_str(value)))
@@ -393,6 +404,9 @@ def configure_data_loaders(args):
             kwargs["is_cropped"] = True
             kwargs["args"] = args
 
+            ### move the augmentation into the dataset
+            if training_augmentation is not None and hasattr(training_augmentation, "forward_c3d"):
+                kwargs["augmentation_instance"] = training_augmentation
             # ----------------------------------------------
             # Create training dataset
             # ----------------------------------------------
@@ -403,14 +417,22 @@ def configure_data_loaders(args):
             # ----------------------------------------------            
             if args.training_dataset == 'KITTI_Comb_Train' or args.training_dataset == 'KITTI_Comb_Full' :
                 custom_batch_sampler = CustomBatchSampler([RandomSampler(train_dataset.dataset1), RandomSampler(train_dataset.dataset2)])
-                train_loader = DataLoader(dataset=train_dataset, batch_sampler=custom_batch_sampler, **gpuargs)
+                # train_loader = DataLoader(dataset=train_dataset, batch_sampler=custom_batch_sampler, **gpuargs)
+                train_loader = DataLoader(dataset=train_dataset, batch_sampler=custom_batch_sampler, collate_fn=default_collate_with_camops_caminfo, **gpuargs)
 
             else:
+                # train_loader = DataLoader(
+                #     train_dataset,
+                #     batch_size=args.batch_size,
+                #     shuffle=True,
+                #     drop_last=True,
+                #     **gpuargs)
                 train_loader = DataLoader(
                     train_dataset,
                     batch_size=args.batch_size,
                     shuffle=True,
                     drop_last=True,
+                    collate_fn=default_collate_with_camops_caminfo,
                     **gpuargs)
 
             _log_statistics(train_dataset, prefix="Training", name=args.training_dataset)
@@ -427,6 +449,9 @@ def configure_data_loaders(args):
             kwargs["is_cropped"] = True
             kwargs["args"] = args
 
+            ### move the augmentation into the dataset
+            if validation_augmentation is not None and hasattr(validation_augmentation, "forward_c3d"):
+                kwargs["augmentation_instance"] = validation_augmentation
             # ----------------------------------------------
             # Create validation dataset
             # ----------------------------------------------
@@ -435,11 +460,18 @@ def configure_data_loaders(args):
             # ----------------------------------------------
             # Create validation loader
             # ----------------------------------------------
+            # validation_loader = DataLoader(
+            #     validation_dataset,
+            #     batch_size=args.batch_size_val,
+            #     shuffle=False,
+            #     drop_last=False,
+            #     **gpuargs)
             validation_loader = DataLoader(
                 validation_dataset,
                 batch_size=args.batch_size_val,
                 shuffle=False,
                 drop_last=False,
+                collate_fn=default_collate_with_camops_caminfo,
                 **gpuargs)
 
             _log_statistics(validation_dataset, prefix="Validation", name=args.validation_dataset)
