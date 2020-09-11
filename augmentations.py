@@ -324,7 +324,8 @@ class Augmentation_SceneFlow_C3D(Augmentation_ScaleCrop):
             scale=scale, 
             resize=resize)
 
-        data_root = "/mnt/storage8t/minghanz/Datasets/KITTI_data/kitti_data"
+        # data_root = "/mnt/storage8t/minghanz/Datasets/KITTI_data/kitti_data"
+        data_root = args.training_dataset_root
         self.c3d_loader = c3d.C3DLoader(data_root=data_root)
 
         ### c3d timer

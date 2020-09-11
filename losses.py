@@ -172,7 +172,7 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
         self._sf_c3d = 1e-6
 
         self.c3d_loss = c3d.C3DLoss(flow_mode=True)
-        f_input = "/home/minghanz/self-mono-sf/scripts/c3d_config.txt"
+        f_input = args.c3d_config_file #"/home/minghanz/self-mono-sf/scripts/c3d_config.txt"
         self.c3d_loss.parse_opts(f_input=f_input)
 
     def depth_loss_left_img(self, disp_l, disp_r, img_l_aug, img_r_aug, ii):

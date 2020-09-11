@@ -130,8 +130,9 @@ class TrainingEpoch:
         self._add_progress_stats = add_progress_stats
         self._tbwriter = tbwriter
 
-        # self.timer = c3d.utils_general.Timing()
+        # self.timer = c3d.utils_general.Timing(logging_mode=True)
     def _step(self, example_dict, model_and_loss, optimizer):
+
         # self.timer.log("step start", 0, True)
 
         # Get input and target tensor keys

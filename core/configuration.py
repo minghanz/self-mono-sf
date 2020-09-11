@@ -262,7 +262,7 @@ class CheckpointSaver:
             include=include_params,
             exclude=exclude_params)
         state_dict = {key: value for key, value in state_dict.items() if key in restore_keys}
-        self._load_state_dict_into_module(state_dict, model_and_loss)
+        self._load_state_dict_into_module(state_dict, model_and_loss, False)    ## False: for compatibility between c3d included and excluded network
         logging.info("  Restore keys:")
         for key in restore_keys:
             logging.info("    %s" % key)

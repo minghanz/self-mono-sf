@@ -199,6 +199,8 @@ def _parse_arguments():
     add("--save_disp", type=tools.str2bool, default=False)
     add("--save_disp2", type=tools.str2bool, default=False)
     add("--finetuning", type=tools.str2bool, default=False)
+    ### for c3d
+    add("--c3d_config_file", type=str, default="c3d_config.txt")
 
     # -------------------------------------------------------------------------
     # Arguments inferred from losses
