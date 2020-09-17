@@ -175,6 +175,9 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
         f_input = args.c3d_config_file #"/home/minghanz/self-mono-sf/scripts/c3d_config.txt"
         self.c3d_loss.parse_opts(f_input=f_input)
 
+        self._sf_dep = 1e-1
+        self.dep_l1_loss = c3d.DepthL1Loss(inbalance_to_closer=args.inbalance_to_closer)
+
     def depth_loss_left_img(self, disp_l, disp_r, img_l_aug, img_r_aug, ii):
 
         img_r_warp = _generate_image_left(img_r_aug, disp_l)
@@ -241,9 +244,10 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
         loss_pts = loss_pts1 + loss_pts2
 
         ############## C3D loss
-        torch.autograd.set_detect_anomaly(False)
+        # torch.autograd.set_detect_anomaly(False)
         if ii >= 1:
             loss_c3d = torch.tensor(0)
+            loss_dep = torch.tensor(0)
         else:
             depth_img_dict_1 = {}
             depth_img_dict_1["rgb"] = img_l1_aug
@@ -284,6 +288,11 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
             loss_c3d = self.c3d_loss(depth_img_dict_1=depth_img_dict_1, depth_img_dict_2=depth_img_dict_2, flow_dict_1to2=flow_dict_1to2, flow_dict_2to1=flow_dict_2to1, cam_info=cam_info)
             loss_c3d = - loss_c3d
 
+            ### l1 depth loss
+            loss_dep_1 = self.dep_l1_loss(depth_img_dict_1["pred"], depth_img_dict_1["gt"], depth_img_dict_1["gt_mask"])
+            loss_dep_2 = self.dep_l1_loss(depth_img_dict_2["pred"], depth_img_dict_2["gt"], depth_img_dict_2["gt_mask"])
+            loss_dep = loss_dep_1 + loss_dep_2
+
         ## 3D motion smoothness loss
         loss_3d_s = ( (_smoothness_motion_2nd(sf_f, img_l1_aug, beta=10.0) / (pts_norm1 + 1e-8)).mean() + (_smoothness_motion_2nd(sf_b, img_l2_aug, beta=10.0) / (pts_norm2 + 1e-8)).mean() ) / (2 ** ii)
 
@@ -292,12 +301,12 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
         
         ### include c3d loss
         loss_c3d_weight = self._sf_c3d * 8**ii              ### 8**ii is because the c3d loss scale is not consistent with differently scaled images
-        sceneflow_loss_c3d = sceneflow_loss + loss_c3d_weight * loss_c3d   
+        sceneflow_loss_c3d = sceneflow_loss + loss_c3d_weight * loss_c3d + self._sf_dep * loss_dep
 
         # print("ii: {}, sum: {:.4f}, loss_im: {:.4f}, loss_pts: {:.4f}, self._sf_3d_pts: {:.4f}, loss_pts_wted: {:.4f}, loss_3d_s: {:.4f}, self._sf_3d_sm: {:.4f}, loss_3d_s_wted: {:.4f}, loss_c3d: {:.4f}, loss_c3d_wt: {:.4f}, loss_c3d_wted: {:.4f}".format(
         #         ii, sceneflow_loss, loss_im, loss_pts, self._sf_3d_pts, self._sf_3d_pts * loss_pts, loss_3d_s, self._sf_3d_sm, self._sf_3d_sm * loss_3d_s, loss_c3d, loss_c3d_weight, loss_c3d_weight * loss_c3d))
 
-        return sceneflow_loss, loss_im, loss_pts, loss_3d_s, loss_c3d, sceneflow_loss_c3d
+        return sceneflow_loss, loss_im, loss_pts, loss_3d_s, loss_c3d, loss_dep, sceneflow_loss_c3d
 
     def detaching_grad_of_outputs(self, output_dict):
         
@@ -323,6 +332,7 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
 
         ### c3d loss
         loss_sf_c3d = 0
+        loss_sf_dep = 0
         loss_sf_sum_c3d = 0
         
         k_l1_aug = target_dict['input_k_l1_aug']
@@ -351,7 +361,7 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
 
 
             ## Sceneflow Loss           
-            loss_sceneflow, loss_im, loss_pts, loss_3d_s, loss_c3d, loss_sceneflow_c3d = self.sceneflow_loss(sf_f, sf_b, 
+            loss_sceneflow, loss_im, loss_pts, loss_3d_s, loss_c3d, loss_dep, loss_sceneflow_c3d = self.sceneflow_loss(sf_f, sf_b, 
                                                                             disp_l1, disp_l2,
                                                                             disp_occ_l1, disp_occ_l2,
                                                                             k_l1_aug, k_l2_aug,
@@ -365,6 +375,7 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
 
             ### c3d loss
             loss_sf_c3d = loss_sf_c3d + loss_c3d
+            loss_sf_dep = loss_sf_dep + loss_dep
             loss_sf_sum_c3d = loss_sf_sum_c3d + loss_sceneflow_c3d * self._weights[ii]
 
         # finding weight
@@ -387,6 +398,7 @@ class Loss_SceneFlow_SelfSup_C3D(nn.Module):
         ### c3d loss
         total_loss_w_c3d = loss_sf_sum_c3d * f_weight + loss_dp_sum * d_weight
         loss_dict["s_c3d"] = loss_sf_c3d
+        loss_dict["s_dep"] = loss_sf_dep
         loss_dict["t_loss_w_c3d"] = total_loss_w_c3d
 
         self.detaching_grad_of_outputs(output_dict['output_dict_r'])

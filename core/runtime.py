@@ -191,7 +191,7 @@ class TrainingEpoch:
         # Reset gradients
         optimizer.zero_grad()
 
-        # self.timer.log("model_and_loss", 0, True)
+        # self.timer.log("model_and_loss", 1, True)
 
         # Run forward pass to get losses and outputs.
         loss_dict, output_dict = model_and_loss(example_dict)
@@ -200,13 +200,13 @@ class TrainingEpoch:
         training_loss = loss_dict[self._args.training_key]
         assert (not np.isnan(training_loss.item())), "training_loss is NaN"
 
-        # self.timer.log("backward", 0, True)
+        # self.timer.log("backward", 1, True)
 
         # Back propagation
         training_loss.backward()
         optimizer.step()
 
-        # self.timer.log("optimize step", 0, True)
+        # self.timer.log("optimize finished", 1, True)
         # Return success flag, loss and output dictionary
         return loss_dict, output_dict
 

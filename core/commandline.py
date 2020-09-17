@@ -201,6 +201,7 @@ def _parse_arguments():
     add("--finetuning", type=tools.str2bool, default=False)
     ### for c3d
     add("--c3d_config_file", type=str, default="c3d_config.txt")
+    add("--inbalance_to_closer", type=float, default=1, help="used in L1 depth loss, which favors closer GT depth when GT depth pcl has overlapping area caused by viewing angle difference. ")
 
     # -------------------------------------------------------------------------
     # Arguments inferred from losses

@@ -19,6 +19,8 @@ from datasets.custom_batchsampler import CustomBatchSampler
 
 from datasets.collate import default_collate_with_caminfo, default_collate_with_camops_caminfo    ## modified to adapt to CamInfo batching
 
+import c3d
+
 # ---------------------------------------------------
 # Class that contains both the network model and loss
 # ---------------------------------------------------
@@ -28,6 +30,8 @@ class ModelAndLoss(nn.Module):
         self._model = model
         self._training_loss = training_loss
         self._evaluation_loss = evaluation_loss
+
+        # self.timer = c3d.utils_general.Timing(logging_mode=True)
 
     @property
     def training_loss(self):
@@ -52,9 +56,12 @@ class ModelAndLoss(nn.Module):
         # Run forward pass
         # -------------------------------------
         # with torch.autograd.detect_anomaly():
-        torch.autograd.set_detect_anomaly(True)
+        # torch.autograd.set_detect_anomaly(True)
+        # self.timer.log_temp("model", True)
         output_dict = self._model(example_dict)
 
+        # self.timer.log_temp_end("model", True)
+        # self.timer.log_temp("loss", True)
         # -------------------------------------
         # Compute losses
         # -------------------------------------
@@ -63,6 +70,7 @@ class ModelAndLoss(nn.Module):
         else:
             loss_dict = self._evaluation_loss(output_dict, example_dict)
 
+        # self.timer.log_temp_end("loss", True)
         # -------------------------------------
         # Return losses and outputs
         # -------------------------------------

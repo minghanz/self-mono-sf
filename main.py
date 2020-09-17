@@ -6,6 +6,10 @@ import subprocess
 import torch
 from core import commandline, runtime, logger, tools, configuration as config
 
+class MyDataParallel(torch.nn.DataParallel):
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
 def main():
     
     # Change working directory
@@ -68,6 +72,9 @@ def main():
         if torch.cuda.device_count() > 1:
             logging.info("Let's use %d GPUs!" % torch.cuda.device_count())
             model_and_loss._model = torch.nn.DataParallel(model_and_loss._model)
+            # model_and_loss._training_loss = torch.nn.DataParallel(model_and_loss._training_loss)
+            # model_and_loss = MyDataParallel(model_and_loss)
+            # model_and_loss._model = torch.nn.parallel.DistributedDataParallel(model_and_loss._model)
         else:
             logging.info("Let's use %d GPU!" % torch.cuda.device_count())
 
