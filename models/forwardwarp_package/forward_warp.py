@@ -53,3 +53,39 @@ class forward_warp(Module):
         flow = torch.clamp(flow, -2*w, 2*w)
 
         return forward_warp_function.apply(im0, flow)
+
+### forward warping considering occlusion (further point has less weight)
+class ForwardWarpDWeight(Module):
+    def __init__(self, ref_scale=5):
+        super(ForwardWarpDWeight, self).__init__()
+
+        self.ref_scale = ref_scale  # the weight changes 2.71(e)x when depth is changed ref_scale meters. 
+
+    def forward(self, x, flow, depth):
+
+        _, _, h, w = x.size()
+        flow = torch.clamp(flow, -2*w, 2*w)
+        flow = flow.transpose(1, 2).transpose(2, 3)
+
+        ### calculate depth weight and forward the weight
+        depth = depth.clamp(min=1e-3, max=80)
+        depth_weight = torch.exp(-(depth-40)/self.ref_scale) # 8 is just a scaling for numerical stability, does not change result. 80m -> e^(-16)=1.125e-7, e^(-16+8)=3.35e-4
+        depth_weight_flowed = forward_warp_function.apply(depth_weight, flow)
+
+        ### forward weighted x
+        x_weighted = x * depth_weight
+        x_weighted_flowed = forward_warp_function.apply(x_weighted, flow)
+
+        ### zero out empty x
+        mask = torch.ones_like(depth)
+        mask_flowed = forward_warp_function.apply(mask, flow)
+
+        mask_flowed_invalid = mask_flowed < 0.5
+        zero_x = torch.zeros_like(x)
+        x_weighted_flowed = torch.where(mask_flowed_invalid, zero_x, x_weighted_flowed)
+
+        assert (depth_weight_flowed[~mask_flowed_invalid] > 1e-7).all()
+        ### normalize forward x using forward weighted x and forward x
+        x_flowed_normalized = x_weighted_flowed / torch.clamp(depth_weight_flowed, min=1e-7)
+
+        return x_flowed_normalized

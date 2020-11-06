@@ -15,6 +15,17 @@ def interpolate2d_as(inputs, target_as, mode="bilinear"):
     _, _, h, w = target_as.size()
     return tf.interpolate(inputs, [h, w], mode=mode, align_corners=True)
 
+def interpolate2d_as_enlarge_only(inputs, target_as, mode="bilinear"):
+    _, _, h, w = target_as.size()
+    _, _, h_ori, w_ori = inputs.size()
+    if h > h_ori and w > w_ori:
+        h_target = h
+        w_target = w
+    else:
+        h_target = h_ori
+        w_target = w_ori
+        
+    return tf.interpolate(inputs, [h_target, w_target], mode=mode, align_corners=True)
 
 def _bchw2bhwc(tensor):
     return tensor.transpose(1,2).transpose(2,3)

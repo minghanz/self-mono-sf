@@ -200,9 +200,33 @@ def _parse_arguments():
     add("--save_disp2", type=tools.str2bool, default=False)
     add("--finetuning", type=tools.str2bool, default=False)
     ### for c3d
-    add("--c3d_config_file", type=str, default="c3d_config.txt")
+    add("--c3d_config_file", type=str, default="scripts/c3d_config.txt")
     add("--inbalance_to_closer", type=float, default=1, help="used in L1 depth loss, which favors closer GT depth when GT depth pcl has overlapping area caused by viewing angle difference. ")
-
+    add("--disable_c3d", action="store_true", help="if specified, not applying any c3d loss")
+    add("--save_per_epoch", type=int, default=0)
+    add("--dep_warp_loss", action="store_true", help="if specified, any depth l1 loss on warped depth")
+    add("--dep_weight", type=float, default=1e-3, help="weight for depth l1 loss ")
+    add("--c3d_weight", type=float, default=1e-4, help="weight for c3d loss ")
+    add("--c3d_knn_mode", action="store_true", help="if specified, use c3d loss calculated based on knn")
+    add("--rigid", action="store_true", help="if set, predict camera motion and use it to compose the rigid flow")
+    add("--rigid_pred", type=str, default="full", choices=["full", "res"], help="decide the meaning of the flow prediction. ")
+    add("--rigid_warp", type=str, default="full", choices=["full", "res", "rigid"], help="how to warp next level feature maps before constructing cost volume. ")
+    add("--rigid_pass", type=str, default="warp", choices=["warp", "pred"], help="what to feed to next level flow decoder. ")
+    add("--save_pic_tboard", action="store_true", help="if specified, show visualization in tensorboard. ")
+    add("--disable_residual_pred", action="store_true", help="if specified, predict full flow instead of add-on to last level predictions. ")
+    add("--reg_depth", action="store_true", help="if specified, predict depth in meters, instead of normalized disparity ")
+    add("--hourglass_decoder", action="store_true", help="if specified, predict using an hourglass structure (U-Net based on ResNet18) with resuable weight and consistent resolution. ")
+    add("--highres_loss", action="store_true", help="if specified, using high resolution predictions to calculate loss. Only valid if hourglass_decoder is chosen.  ")
+    add("--rigid_flow_loss", action="store_true", help="if specified, calculate loss for rigid flow separately. Otherwise just penalize difference between rigid flow and full flow at masked region.  ")
+    add("--strict_flow_acc", action="store_true", help="if specified, accumulate the residual flow considering the shift of flow origin.  ")
+    add("--strict_flow_acc_ramp", type=int, default=0, help="if greater than zero, gradually shift from original residual flow to warped residual flow in specified epochs. ")
+    add("--c3d_pose_weight", type=float, default=0, help="if greater than zero, calculate pose loss using c3d loss between gt lidar scans with transformation. ")
+    add("--shared_posehead", action="store_true", help="if specified, use shared pose predictor. Only valid if not using hourglass_decoder. ")
+    add("--pose_not_separable", action="store_true", help="if specified, use FCN instead of two separate layers in spatial and feature dimensions.  ")
+    add("--use_posenet", action="store_true", help="if specified, use a dedicated pose net for pose regression.  ")
+    add("--strict_flow_acc_uvd", action="store_true", help="if specified, use uvd prediction as sceneflow representation and concat using strict recursive inference.  ")
+    add("--pred_xyz_add_uvd", action="store_true", help="if specified, use uvd to aggregate while use xyz in prediction.  ")
+    
     # -------------------------------------------------------------------------
     # Arguments inferred from losses
     # -------------------------------------------------------------------------

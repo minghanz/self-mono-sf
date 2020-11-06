@@ -2,7 +2,8 @@
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-cxx_args = ['-std=c++11']
+# cxx_args = ['-std=c++11']
+cxx_args = ['-std=c++14']   # for pytorch 1.6
 
 nvcc_args = [
     '-gencode', 'arch=compute_50,code=sm_50',

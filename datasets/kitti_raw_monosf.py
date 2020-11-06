@@ -11,6 +11,7 @@ from .common import kitti_crop_image_list, kitti_adjust_intrinsic
 
 import c3d
 from .collate import default_collate_with_camops_caminfo, decollate_with_camops_caminfo
+import logging
 
 class KITTI_Raw(data.Dataset):
     def __init__(self,

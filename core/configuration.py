@@ -294,7 +294,8 @@ class CheckpointSaver:
             directory, self._prefix + self._best_postfix + self._extension)
         return self.restore(best_checkpoint_filename, model_and_loss, include_params, exclude_params)
 
-    def save_latest(self, directory, model_and_loss, stats_dict, store_as_best=False):
+    def save_latest(self, directory, model_and_loss, stats_dict, store_as_best=False, store_at_epoch=-1):
+        ### add argument: store_at_epoch to enable saving checkpoint regularly at certain epochs. 
         # -----------------------------------------------------------------------------------------
         # Make sure directory exists
         # -----------------------------------------------------------------------------------------
@@ -308,6 +309,15 @@ class CheckpointSaver:
 
         latest_checkpoint_filename = os.path.join(directory, self._prefix + self._latest_postfix + self._extension)
         torch.save(save_dict, latest_checkpoint_filename)
+
+        # -----------------------------------------------------------------------------------------
+        # Possibly store at epoch
+        # -----------------------------------------------------------------------------------------
+        if store_at_epoch >= 0:
+            epoch_checkpoint_filename = os.path.join(directory, self._prefix + "_epoch_%02d"%store_at_epoch + self._extension)
+
+            logging.info("Saved checkpoint as model at epoch %02d.."%store_at_epoch)
+            shutil.copyfile(latest_checkpoint_filename, epoch_checkpoint_filename)
 
         # -----------------------------------------------------------------------------------------
         # Possibly store as best

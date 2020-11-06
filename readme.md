@@ -1,3 +1,7 @@
+```
+conda install -c conda-forge colorama scikit-image opencv tqdm=4.30 pytz libpng tensorboard
+pip install torchsnooper
+```
 # Self-Supervised Monocular Scene Flow Estimation
 
 <img src=demo/demo.gif> 

@@ -30,6 +30,32 @@ def disp2depth_kitti(pred_disp, k_value):
 
     return pred_depth
 
+### depth to dispaity
+def depth2disp_kitti(pred_depth, k_value):
+    pred_disp = k_value.unsqueeze(1).unsqueeze(1).unsqueeze(1) * 0.54 / (pred_depth + 1e-8)
+    # pred_depth = torch.clamp(pred_depth, 0, 80)
+    return pred_disp
+
+### depth to dispaity with scaling intrinsics
+def depth2dispn_kitti_ms(pred_depth, intrinsic, input_size):
+
+    ### scale disp to pixel unit
+    _, _, h_dp, w_dp = pred_depth.size()
+
+    ## scale alignment between input and current resolution (since it is coarse-to-fine)
+    local_scale = torch.zeros_like(input_size)
+    local_scale[:, 0] = h_dp
+    local_scale[:, 1] = w_dp    
+    rel_scale = local_scale / input_size
+
+    intrinsic_dp_s = intrinsic_scale(intrinsic, rel_scale[:,0], rel_scale[:,1])
+    pred_disp = depth2disp_kitti(pred_depth, intrinsic_dp_s[:, 0, 0])
+    pred_disp = pred_disp / w_dp
+    
+    pred_disp = pred_disp.clamp(min=1e-7, max=0.3)
+
+    return pred_disp, intrinsic_dp_s
+
 
 def get_pixelgrid(b, h, w):
     grid_h = torch.linspace(0.0, w - 1, w).view(1, 1, 1, w).expand(b, 1, h, w)
@@ -77,6 +103,13 @@ def intrinsic_scale(intrinsic, scale_y, scale_x):
 
     return intrinsic_s
 
+### input depth
+def pixel2pts_ms_from_depth(intrinsic, output_depth, rel_scale):
+    intrinsic_dp_s = intrinsic_scale(intrinsic, rel_scale[:,0], rel_scale[:,1])
+    pts, _ = pixel2pts(intrinsic_dp_s, output_depth)
+
+    return pts, intrinsic_dp_s
+
 
 def pixel2pts_ms(intrinsic, output_disp, rel_scale):
     # pixel2pts
@@ -95,6 +128,15 @@ def pixel2pts_ms_and_depth(intrinsic, output_disp, rel_scale):
 
     return pts, intrinsic_dp_s, output_depth
 
+### added to use C3D loss
+def pixel2pts_ms_and_uv1grid(intrinsic, output_disp, rel_scale):
+    # pixel2pts
+    intrinsic_dp_s = intrinsic_scale(intrinsic, rel_scale[:,0], rel_scale[:,1])
+    output_depth = disp2depth_kitti(output_disp, intrinsic_dp_s[:, 0, 0])
+    pts, pixelgrid = pixel2pts(intrinsic_dp_s, output_depth)
+
+    return pts, intrinsic_dp_s, pixelgrid
+
 def pts2pixel_ms(intrinsic, pts, output_sf, disp_size):
 
     # +sceneflow and reprojection
@@ -110,21 +152,67 @@ def pts2pixel_ms(intrinsic, pts, output_sf, disp_size):
 
 
 def reconstructImg(coord, img):
+    torch_vs = torch.__version__
+    digits = torch_vs.split(".")
+    torch_vs_n = float(digits[0]) + float(digits[1]) * 0.1
+    grid_sample_specify_align_flag = torch_vs_n >= 1.3 
+
     grid = coord.transpose(1, 2).transpose(2, 3)
-    img_warp = tf.grid_sample(img, grid)
+    if grid_sample_specify_align_flag:
+        img_warp = tf.grid_sample(img, grid, align_corners=True)
+    else:
+        img_warp = tf.grid_sample(img, grid)
 
     mask = torch.ones_like(img, requires_grad=False)
-    mask = tf.grid_sample(mask, grid)
+    if grid_sample_specify_align_flag:
+        mask = tf.grid_sample(mask, grid)
+    else:
+        mask = tf.grid_sample(mask, grid)
+
     mask = (mask >= 1.0).float()
     return img_warp * mask
 
+def reconstructImgMask(coord, img):
+    torch_vs = torch.__version__
+    digits = torch_vs.split(".")
+    torch_vs_n = float(digits[0]) + float(digits[1]) * 0.1
+    grid_sample_specify_align_flag = torch_vs_n >= 1.3 
+
+    grid = coord.transpose(1, 2).transpose(2, 3)
+    if grid_sample_specify_align_flag:
+        img_warp = tf.grid_sample(img, grid, align_corners=True)
+    else:
+        img_warp = tf.grid_sample(img, grid)
+
+    mask = torch.ones_like(img, requires_grad=False)
+    if grid_sample_specify_align_flag:
+        mask = tf.grid_sample(mask, grid, align_corners=True)
+    else:
+        mask = tf.grid_sample(mask, grid)
+
+    mask = (mask >= 1.0).float()
+    img_warp = img_warp * mask
+    mask = mask.bool()
+    return img_warp, mask
 
 def reconstructPts(coord, pts):
+    torch_vs = torch.__version__
+    digits = torch_vs.split(".")
+    torch_vs_n = float(digits[0]) + float(digits[1]) * 0.1
+    grid_sample_specify_align_flag = torch_vs_n >= 1.3 
+    
     grid = coord.transpose(1, 2).transpose(2, 3)
-    pts_warp = tf.grid_sample(pts, grid)
+    if grid_sample_specify_align_flag:
+        pts_warp = tf.grid_sample(pts, grid, align_corners=True)
+    else:
+        pts_warp = tf.grid_sample(pts, grid)
 
     mask = torch.ones_like(pts, requires_grad=False)
-    mask = tf.grid_sample(mask, grid)
+    if grid_sample_specify_align_flag:
+        mask = tf.grid_sample(mask, grid, align_corners=True)
+    else:
+        mask = tf.grid_sample(mask, grid)
+
     mask = (mask >= 1.0).float()
     return pts_warp * mask
 

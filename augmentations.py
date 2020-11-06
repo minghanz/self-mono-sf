@@ -10,6 +10,7 @@ from utils.interpolation import Interp2, Meshgrid
 
 import c3d
 import torchsnooper
+import logging
 
 class PhotometricAugmentation(nn.Module):
     def __init__(self):
@@ -147,6 +148,13 @@ class Augmentation_ScaleCrop(nn.Module):
         self._max_scale = scale[1]
         self._max_trans = trans
         self._resize = resize
+
+        ### deal with grid_sample version compatibility
+        torch_vs = torch.__version__
+        digits = torch_vs.split(".")
+        torch_vs_n = float(digits[0]) + float(digits[1]) * 0.1
+        self.grid_sample_specify_align_flag = torch_vs_n >= 1.3  
+        ### since pytorch 1.3, default behavior changed to align_corners=False. Need to specify align_corners=True if old behavior is wanted. In old version there is no align_corners option. 
 
     def compose_params(self, scale, rot, tx, ty):
         return torch.cat([scale, rot, tx, ty], dim=1)
@@ -328,6 +336,8 @@ class Augmentation_SceneFlow_C3D(Augmentation_ScaleCrop):
         data_root = args.training_dataset_root
         self.c3d_loader = c3d.C3DLoader(data_root=data_root)
 
+        self.hourglass_decoder = args.hourglass_decoder
+        self.highres_loss = args.highres_loss
         ### c3d timer
         # self.timer = c3d.utils_general.Timing()
 
@@ -343,6 +353,13 @@ class Augmentation_SceneFlow_C3D(Augmentation_ScaleCrop):
         intm_size_w = torch.floor(img_size[1] * intm_scale)
         scale_x = intm_size_w / resize[1]
         scale_y = intm_size_h / resize[0]
+
+        # print("scale_x", scale_x)
+        # print("scale_y", scale_y)
+        # print("----------------")
+        # logging.info("scale_x, {}".format(scale_x) )  # scale_x != scale_y
+        # logging.info("scale_y, {}".format(scale_y) )
+        # print("----------------")
 
         ## Coord of the resized image
         pt_o = torch.zeros([1, 1]).float()
@@ -460,12 +477,15 @@ class Augmentation_SceneFlow_C3D(Augmentation_ScaleCrop):
         mask_l1_float = example_dict["c3d_mask_l1_aug_scale_0"].float()
         mask_l2_float = example_dict["c3d_mask_l2_aug_scale_0"].float()
 
-        for ii in range(1,1):
+        for ii in range(1,5):
             # self.timer.log("scaled %d"%ii, 0, True)
-            new_width = int(new_width * 0.5)
-            new_height = int(new_height * 0.5)
-            for ib in range(self._batch):
-                cam_ops[ib].append(c3d.utils.CamScale(new_height=new_height, new_width=new_width, align_corner=True))
+            if self.highres_loss and self.hourglass_decoder and ii > 2:
+                pass
+            else:
+                new_width = int(new_width * 0.5)
+                new_height = int(new_height * 0.5)
+                for ib in range(self._batch):
+                    cam_ops[ib].append(c3d.utils.CamScale(new_height=new_height, new_width=new_width, align_corner=True))
             
             cam_info_l1, depth_dict_l1, cache_list_l1 = self.c3d_loader.load(im_l1_fname, cam_ops, cache_lidar_1, no_mask=True)
             cache_inex_init_l = [ cache["inex_init"] for cache in cache_list_l1 ]
@@ -519,10 +539,16 @@ class Augmentation_SceneFlow_C3D(Augmentation_ScaleCrop):
         params_scale, _, _, _ = self.decompose_params(params)
 
         ## Augment images
-        im_l1 = tf.grid_sample(im_l1, coords)
-        im_l2 = tf.grid_sample(im_l2, coords)
-        im_r1 = tf.grid_sample(im_r1, coords)        
-        im_r2 = tf.grid_sample(im_r2, coords)
+        if self.grid_sample_specify_align_flag:
+            im_l1 = tf.grid_sample(im_l1, coords, align_corners=True)
+            im_l2 = tf.grid_sample(im_l2, coords, align_corners=True)
+            im_r1 = tf.grid_sample(im_r1, coords, align_corners=True)        
+            im_r2 = tf.grid_sample(im_r2, coords, align_corners=True)
+        else:
+            im_l1 = tf.grid_sample(im_l1, coords)
+            im_l2 = tf.grid_sample(im_l2, coords)
+            im_r1 = tf.grid_sample(im_r1, coords)        
+            im_r2 = tf.grid_sample(im_r2, coords)
 
         ## Augment intrinsic matrix         
         k_list = [k_l1.unsqueeze(1), k_l2.unsqueeze(1), k_r1.unsqueeze(1), k_r2.unsqueeze(1)]
@@ -616,10 +642,16 @@ class Augmentation_SceneFlow(Augmentation_ScaleCrop):
         params_scale, _, _, _ = self.decompose_params(params)
 
         ## Augment images
-        im_l1 = tf.grid_sample(im_l1, coords)
-        im_l2 = tf.grid_sample(im_l2, coords)
-        im_r1 = tf.grid_sample(im_r1, coords)        
-        im_r2 = tf.grid_sample(im_r2, coords)
+        if self.grid_sample_specify_align_flag:
+            im_l1 = tf.grid_sample(im_l1, coords, align_corners=True)
+            im_l2 = tf.grid_sample(im_l2, coords, align_corners=True)
+            im_r1 = tf.grid_sample(im_r1, coords, align_corners=True)        
+            im_r2 = tf.grid_sample(im_r2, coords, align_corners=True)
+        else:
+            im_l1 = tf.grid_sample(im_l1, coords)
+            im_l2 = tf.grid_sample(im_l2, coords)
+            im_r1 = tf.grid_sample(im_r1, coords)        
+            im_r2 = tf.grid_sample(im_r2, coords)
 
         ## Augment intrinsic matrix         
         k_list = [k_l1.unsqueeze(1), k_l2.unsqueeze(1), k_r1.unsqueeze(1), k_r2.unsqueeze(1)]
@@ -700,8 +732,12 @@ class Augmentation_MonoDepth(Augmentation_ScaleCrop):
         params_scale, _, _, _ = self.decompose_params(params)
 
         ## Augment images
-        im_l1 = tf.grid_sample(im_l1, coords)
-        im_r1 = tf.grid_sample(im_r1, coords)
+        if self.grid_sample_specify_align_flag:
+            im_l1 = tf.grid_sample(im_l1, coords, align_corners=True)
+            im_r1 = tf.grid_sample(im_r1, coords, align_corners=True)
+        else:
+            im_l1 = tf.grid_sample(im_l1, coords)
+            im_r1 = tf.grid_sample(im_r1, coords)
 
         ## Augment intrinsic matrix
         k_list = [k_l1.unsqueeze(1), k_r1.unsqueeze(1)]

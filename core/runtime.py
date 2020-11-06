@@ -23,6 +23,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 import c3d
 
+from utils.interpolation import interpolate2d_as
+from utils.sceneflow_util import pixel2pts_ms, pts2pixel_ms, reconstructImg, reconstructPts, projectSceneFlow2Flow
+
 # --------------------------------------------------------------------------------
 # Exponential moving average smoothing factor for speed estimates
 # Ranges from 0 (average speed) to 1 (current/instantaneous speed) [default: 0.3].
@@ -157,6 +160,8 @@ class TrainingEpoch:
 
                 if isinstance(value, list):     ### c3d: for cam_ops and names
                     continue
+                if isinstance(value, int):     ### c3d: for cam_ops and names
+                    continue
                 if isinstance(value, torch.Tensor):
                     example_dict[key] = value.cuda(non_blocking=True)
                 else:
@@ -174,6 +179,8 @@ class TrainingEpoch:
         # Convert inputs/targets to variables that require gradients
         for key, tensor in example_dict.items():
             if isinstance(tensor, list):     ### c3d: for cam_ops and names
+                continue
+            if isinstance(tensor, int):     ### c3d: for cam_ops and names
                 continue
             if self._args.cuda:
                 if isinstance(tensor, torch.Tensor):
@@ -210,7 +217,7 @@ class TrainingEpoch:
         # Return success flag, loss and output dictionary
         return loss_dict, output_dict
 
-    def run(self, model_and_loss, optimizer):
+    def run(self, model_and_loss, optimizer, epoch):
 
         n_iter = 0
         model_and_loss.train()
@@ -228,6 +235,9 @@ class TrainingEpoch:
         # Perform training steps
         with create_progressbar(**progressbar_args) as progress:
             for example_dict in progress:
+
+                torch.cuda.reset_max_memory_allocated()
+                example_dict["epoch"] = epoch       ### added Nov.1 for strict_flow_acc_ramp
 
                 # self.timer.log("before step start", 0, True)
                 # perform step
@@ -259,6 +269,8 @@ class TrainingEpoch:
                 progress.set_postfix(progress_stats)
 
                 # self.timer.log("end of a loop", 0, True)
+                gpu_allo = torch.cuda.max_memory_allocated()
+                logging.info("mem: {}".format(gpu_allo))
 
         # Return loss and output dictionary
         ema_loss_dict = { key: ma.mean() for key, ma in moving_averages_dict.items() }
@@ -279,6 +291,7 @@ class EvaluationEpoch:
         self._add_progress_stats = add_progress_stats
         self._augmentation = augmentation
         self._tbwriter = tbwriter
+        self._save_tboard = args.save_pic_tboard
         self._save_output = False
         if self._args.save_flow or self._args.save_disp or self._args.save_disp2:
             self._save_output = True
@@ -358,6 +371,167 @@ class EvaluationEpoch:
                 file_name2 = file_names_disp2[ii] + '_10.png'
                 write_depth_png(file_name2, out_disp2[ii, 0, ...])
 
+    def save_tboard(self, example_dict, output_dict, epoch, ib):
+
+        if "out_disp_l_pp" not in output_dict:
+            input_l1 = example_dict['input_l1']
+            intrinsics = example_dict['input_k_l1']
+
+            disp_key = "disp_l1_pp" if "disp_l1_pp" in output_dict else "disp_l1"
+            out_disp_l1 = interpolate2d_as(output_dict[disp_key][0], input_l1, mode="bilinear") * input_l1.size(3)
+            # out_depth_l1 = _disp2depth_kitti_K(out_disp_l1, intrinsics[:, 0, 0])
+            # out_depth_l1 = torch.clamp(out_depth_l1, 1e-3, 80)
+            output_dict["out_disp_l_pp"] = out_disp_l1
+
+            ## Optical Flow Eval
+            flow_key = "flow_f_pp" if "flow_f_pp" in output_dict else "flow_f"
+            out_sceneflow = interpolate2d_as(output_dict[flow_key][0], input_l1, mode="bilinear")
+            out_flow = projectSceneFlow2Flow(example_dict['input_k_l1'], out_sceneflow, output_dict["out_disp_l_pp"])        
+            output_dict["out_flow_pp"] = out_flow
+
+        ### save flow
+        out_flow = output_dict["out_flow_pp"].data.cpu().numpy()
+        b_size = output_dict["out_flow_pp"].data.size(0)
+
+        for ii in range(0, b_size):
+            # Vis
+            flow_f_rgb = flow_to_png_middlebury(out_flow[ii, ...])
+            # logging.info("flow_f_rgb type {} max {} min {} dtype {} shape {}".format(type(flow_f_rgb), flow_f_rgb.max(), flow_f_rgb.min(), flow_f_rgb.dtype, flow_f_rgb.shape))
+            self._tbwriter.add_image('Flow/eval_%d_%d'%(ib,ii), flow_f_rgb, epoch, dataformats='HWC')
+
+        ### save_disp:
+        b_size = output_dict["out_disp_l_pp"].data.size(0)
+        out_disp = output_dict["out_disp_l_pp"].data.cpu().numpy()
+
+        for ii in range(0, b_size):
+            # Vis
+            disp_ii = out_disp[ii, ...]
+            norm_disp = (disp_ii / disp_ii.max() * 255).astype(np.uint8)
+
+            # logging.info("norm_disp type {} max {} min {} dtype {} shape {}".format(type(norm_disp), norm_disp.max(), norm_disp.min(), norm_disp.dtype, norm_disp.shape))
+            self._tbwriter.add_image('Disp/eval_%d_%d'%(ib,ii), norm_disp, epoch)
+            
+        if epoch <= 1:
+            ### save pic
+            input_rgb = example_dict['input_l1'].data.cpu().numpy()
+            b_size = example_dict['input_l1'].data.size(0)
+
+            for ii in range(0, b_size):
+                # Vis
+                rgb_ii = input_rgb[ii, ...]
+
+                # logging.info("rgb_ii type {} max {} min {} dtype {} shape {}".format(type(rgb_ii), rgb_ii.max(), rgb_ii.min(), rgb_ii.dtype, rgb_ii.shape))
+                self._tbwriter.add_image('RGB/eval_%d_%d'%(ib,ii), rgb_ii, epoch)
+
+        ### save rigid flow
+        if "flow_f_rigid_acc" in output_dict:
+
+            out_sceneflow_rigid = interpolate2d_as(output_dict['flow_f_rigid_acc'][0], input_l1, mode="bilinear")
+            out_optical_flow_rigid = projectSceneFlow2Flow(example_dict['input_k_l1'], out_sceneflow_rigid, output_dict["out_disp_l_pp"])   
+
+            b_size = out_optical_flow_rigid.data.size(0)
+            out_optical_flow_rigid = out_optical_flow_rigid.data.cpu().numpy()
+
+            for ii in range(0, b_size):
+                # Vis
+                flow_f_rgb = flow_to_png_middlebury(out_optical_flow_rigid[ii, ...])
+
+                # logging.info("flow_f_rigid type {} max {} min {} dtype {} shape {}".format(type(flow_f_rgb), flow_f_rgb.max(), flow_f_rgb.min(), flow_f_rgb.dtype, flow_f_rgb.shape))
+                self._tbwriter.add_image('Flow_rigid/eval_%d_%d'%(ib,ii), flow_f_rgb, epoch, dataformats='HWC')
+
+        ### save res flow
+        if "flow_f_res_acc" in output_dict:
+            out_sceneflow_res = interpolate2d_as(output_dict['flow_f_res_acc'][0], input_l1, mode="bilinear")
+            out_optical_flow_res = projectSceneFlow2Flow(example_dict['input_k_l1'], out_sceneflow_res, output_dict["out_disp_l_pp"])  
+
+            b_size = out_optical_flow_res.data.size(0)
+            out_optical_flow_res = out_optical_flow_res.data.cpu().numpy()
+
+            for ii in range(0, b_size):
+                # Vis
+                flow_f_rgb = flow_to_png_middlebury(out_optical_flow_res[ii, ...])
+
+                # logging.info("flow_f_res type {} max {} min {} dtype {} shape {}".format(type(flow_f_rgb), flow_f_rgb.max(), flow_f_rgb.min(), flow_f_rgb.dtype, flow_f_rgb.shape))
+                self._tbwriter.add_image('Flow_res/eval_%d_%d'%(ib,ii), flow_f_rgb, epoch, dataformats='HWC')
+        
+        ### save res mask
+        if "flow_f_res_mask_acc" in output_dict:
+            out_flow_res_mask = output_dict["flow_f_res_mask_acc"][0].data.cpu().numpy()
+            b_size = output_dict["flow_f_res_mask_acc"][0].data.size(0)
+
+            for ii in range(0, b_size):
+                # logging.info("flow_f_res type {} max {} min {} dtype {} shape {}".format(type(flow_f_rgb), flow_f_rgb.max(), flow_f_rgb.min(), flow_f_rgb.dtype, flow_f_rgb.shape))
+                self._tbwriter.add_image('Flow_res_mask/eval_%d_%d'%(ib,ii), out_flow_res_mask[ii], epoch)
+        
+        ### save rigid_mask
+        if "flow_f_rigid_mask_acc" in output_dict:
+            out_flow_rigid_mask = output_dict["flow_f_rigid_mask_acc"][0].data.cpu().numpy()
+            b_size = output_dict["flow_f_rigid_mask_acc"][0].data.size(0)
+
+            for ii in range(0, b_size):
+                # logging.info("flow_f_res type {} max {} min {} dtype {} shape {}".format(type(flow_f_rgb), flow_f_rgb.max(), flow_f_rgb.min(), flow_f_rgb.dtype, flow_f_rgb.shape))
+                self._tbwriter.add_image('Flow_rigid_mask/eval_%d_%d'%(ib,ii), out_flow_rigid_mask[ii], epoch)
+        
+    def save_tboard_hist(self, output_dict, epoch, ib):
+        if 'pose21s' not in output_dict:
+            self.no_hist = True
+            return
+        self.no_hist = False
+        pose21s = output_dict['pose21s']    # a list of B*6
+        pose12s = output_dict['pose12s']
+        
+        n_levels = len(pose12s)
+        assert n_levels == len(pose21s)
+
+        if ib == 0:
+            self.pose21_acc = []
+            self.pose12_acc = []
+
+            for il in range(n_levels):
+                self.pose21_acc.append([])
+                self.pose12_acc.append([])
+                
+        for il in range(n_levels):
+            self.pose21_acc[il].append(pose21s[il])
+            self.pose12_acc[il].append(pose12s[il])
+
+        # ### norm of scene flow
+        # flow_f = output_dict['flow_f']
+        # flow_f_norm = torch.norm(flow_f, dim=1, keepdim=True).flatten(2)    # B*1*N
+        # flow_f_norm_mean = flow_f_norm.mean(2)  # B*1
+        # flow_f_norm_min = flow_f_norm.min(2)  # B*1
+        
+        return
+            
+    def save_tboard_hist_total(self, epoch):
+        if self.no_hist:
+            return
+            
+        n_levels = len(self.pose21_acc)
+
+        for il in range(n_levels):
+            pose21_total = torch.cat(self.pose21_acc[il], dim=0)   # N*6
+            self._tbwriter.add_histogram("pose21_w1/level_%d"%il, pose21_total[:,0], epoch)
+            self._tbwriter.add_histogram("pose21_w2/level_%d"%il, pose21_total[:,1], epoch)
+            self._tbwriter.add_histogram("pose21_w3/level_%d"%il, pose21_total[:,2], epoch)
+            self._tbwriter.add_histogram("pose21_t1/level_%d"%il, pose21_total[:,3], epoch)
+            self._tbwriter.add_histogram("pose21_t2/level_%d"%il, pose21_total[:,4], epoch)
+            self._tbwriter.add_histogram("pose21_t3/level_%d"%il, pose21_total[:,5], epoch)
+
+            pose12_total = torch.cat(self.pose12_acc[il], dim=0)   # N*6
+            self._tbwriter.add_histogram("pose12_w1/level_%d"%il, pose12_total[:,0], epoch)
+            self._tbwriter.add_histogram("pose12_w2/level_%d"%il, pose12_total[:,1], epoch)
+            self._tbwriter.add_histogram("pose12_w3/level_%d"%il, pose12_total[:,2], epoch)
+            self._tbwriter.add_histogram("pose12_t1/level_%d"%il, pose12_total[:,3], epoch)
+            self._tbwriter.add_histogram("pose12_t2/level_%d"%il, pose12_total[:,4], epoch)
+            self._tbwriter.add_histogram("pose12_t3/level_%d"%il, pose12_total[:,5], epoch)
+
+            self.pose21_acc[il] = []
+            self.pose12_acc[il] = []
+            
+        self.pose21_acc = []
+        self.pose12_acc = []
+        
 
     def _step(self, example_dict, model_and_loss):
 
@@ -378,6 +552,8 @@ class EvaluationEpoch:
                 elif key in c3d_keys:
                     if isinstance(value, list):     ### c3d: for cam_ops and names
                         continue
+                    if isinstance(value, int):     ### c3d: for cam_ops and names
+                        continue
                     if isinstance(value, torch.Tensor):
                         example_dict[key] = value.cuda(non_blocking=True)
                     else:
@@ -390,6 +566,8 @@ class EvaluationEpoch:
         # Convert inputs/targets to variables that require gradients
         for key, tensor in example_dict.items():
             if isinstance(tensor, list):     ### c3d: for cam_ops and names
+                continue
+            if isinstance(tensor, int):     ### c3d: for cam_ops and names
                 continue
             if self._args.cuda:
                 if isinstance(tensor, torch.Tensor):
@@ -423,16 +601,27 @@ class EvaluationEpoch:
                 "postfix": True
             }
 
+            tboard_saved = 0 ### Only save the first batch in an epoch (to save space)
             # Perform evaluation steps
             with create_progressbar(**progressbar_args) as progress:
-                for example_dict in progress:
+                for ib, example_dict in enumerate(progress):
 
+                    torch.cuda.reset_max_memory_allocated()
+
+                    example_dict["epoch"] = epoch       ### added Nov.1 for strict_flow_acc_ramp
                     # Perform forward evaluation step
                     loss_dict_per_step, output_dict = self._step(example_dict, model_and_loss)
 
                     # Save results
                     if self._save_output:
                         self.save_outputs(example_dict, output_dict)
+
+                    ### save to tensorboard (visualization)
+                    if self._save_tboard and ib % 100 == 0 and tboard_saved < 5 and (epoch % 5 == 0 or epoch <5):
+                        self.save_tboard(example_dict, output_dict, epoch, ib)
+                        tboard_saved += 1
+                    if self._save_tboard:
+                        self.save_tboard_hist(output_dict, epoch, ib)
 
                     # Convert loss dictionary to float
                     loss_dict_per_step = tensor2float_dict(loss_dict_per_step)
@@ -453,6 +642,12 @@ class EvaluationEpoch:
                         moving_averages_postfix="")
 
                     progress.set_postfix(progress_stats)
+
+                    gpu_allo = torch.cuda.max_memory_allocated()
+                    logging.info("mem: {}".format(gpu_allo))
+
+            if self._save_tboard:
+                self.save_tboard_hist_total(epoch)
 
             # Record average losses
             avg_loss_dict = { key: ma.mean() for key, ma in moving_averages_dict.items() }
@@ -532,6 +727,10 @@ def exec_runtime(args,
     store_as_best = False
 
 
+    ### run an evaluation epoch as sanity check before starting training
+    # if args.start_epoch == 1:
+    #     avg_loss_dict, output_dict = evaluation_module.run(model_and_loss=model_and_loss, epoch=0)
+
     for epoch in range(args.start_epoch, args.total_epochs + 1):
         with logger.LoggingBlock("Epoch %i/%i" % (epoch, args.total_epochs), emph=True):
 
@@ -547,7 +746,7 @@ def exec_runtime(args,
             # Create and run a training epoch
             # -------------------------------------------
             if train_loader is not None:
-                avg_loss_dict, _ = training_module.run(model_and_loss=model_and_loss, optimizer=optimizer)
+                avg_loss_dict, _ = training_module.run(model_and_loss=model_and_loss, optimizer=optimizer, epoch=epoch)
 
                 if args.evaluation is False:
                     tensorBoardWriter.add_scalar('Train/Loss', avg_loss_dict[args.training_key], epoch)
@@ -603,12 +802,14 @@ def exec_runtime(args,
             # ----------------------------------------------------------------
             # Store checkpoint
             # ----------------------------------------------------------------
+            saving_at_epoch = epoch if args.save_per_epoch > 0 and epoch % args.save_per_epoch == 0 else -1
             if checkpoint_saver is not None:
                 checkpoint_saver.save_latest(
                     directory=args.save,
                     model_and_loss=model_and_loss,
                     stats_dict=dict(avg_loss_dict, epoch=epoch),
-                    store_as_best=store_as_best)
+                    store_as_best=store_as_best, 
+                    store_at_epoch=saving_at_epoch)
 
             # ----------------------------------------------------------------
             # Vertical space between epochs

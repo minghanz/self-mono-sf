@@ -10,6 +10,9 @@ from .common import read_image_as_byte, read_calib_into_dict, read_png_flow, rea
 from .common import kitti_crop_image_list, kitti_adjust_intrinsic, intrinsic_scale, get_date_from_width
 from .common import list_flatten
 
+import c3d
+import logging
+
 VALIDATE_INDICES = [2, 34, 35, 36, 37, 38, 39, 40, 41, 42, 77, 78, 79, 80, 81, 83, 99, 100, 101, 102, 105, 106, 112, 113, 114, 115, 116, 117, 133, 141, 144, 145, 167, 187, 190, 191, 192, 193, 195, 199]
 
 
@@ -19,14 +22,21 @@ class KITTI_2015_Train_Base(data.Dataset):
                  data_root=None,
                  dstype="full"):
 
-        images_l_root = os.path.join(data_root, "data_scene_flow", "training", "image_2_jpg")
-        images_r_root = os.path.join(data_root, "data_scene_flow", "training", "image_3_jpg")
-        flow_root_occ = os.path.join(data_root, "data_scene_flow", "training", "flow_occ")
-        flow_root_noc = os.path.join(data_root, "data_scene_flow", "training", "flow_noc")
-        disp0_root_occ = os.path.join(data_root, "data_scene_flow", "training", "disp_occ_0")
-        disp1_root_occ = os.path.join(data_root, "data_scene_flow", "training", "disp_occ_1")
-        disp0_root_noc = os.path.join(data_root, "data_scene_flow", "training", "disp_noc_0")
-        disp1_root_noc = os.path.join(data_root, "data_scene_flow", "training", "disp_noc_1")
+        self.verify_lidar_depth = False
+
+        images_l_root = os.path.join(data_root, "training", "image_2_jpg")       # data_root, "data_scene_flow", "training", "image_2_jpg"
+        images_r_root = os.path.join(data_root, "training", "image_3_jpg")
+        flow_root_occ = os.path.join(data_root, "training", "flow_occ")
+        flow_root_noc = os.path.join(data_root, "training", "flow_noc")
+        disp0_root_occ = os.path.join(data_root, "training", "disp_occ_0")
+        disp1_root_occ = os.path.join(data_root, "training", "disp_occ_1")
+        disp0_root_noc = os.path.join(data_root, "training", "disp_noc_0")
+        disp1_root_noc = os.path.join(data_root, "training", "disp_noc_1")
+
+        if self.verify_lidar_depth:
+            lidar_root = os.path.join(data_root, "training", "lidar")
+            calib_vc_root = os.path.join(data_root, "training", "calib_velo_to_cam")
+            calib_cc_root = os.path.join(data_root, "training", "calib_cam_to_cam")
 
         ## loading image -----------------------------------
         if not os.path.isdir(images_l_root):
@@ -46,6 +56,14 @@ class KITTI_2015_Train_Base(data.Dataset):
         if not os.path.isdir(disp1_root_noc):
             raise ValueError("disparity directory {} not found!".format(disp1_root_noc))
 
+        if self.verify_lidar_depth:
+            if not os.path.isdir(lidar_root):
+                raise ValueError("disparity directory {} not found!".format(lidar_root))
+            if not os.path.isdir(calib_vc_root):
+                raise ValueError("disparity directory {} not found!".format(calib_vc_root))
+            if not os.path.isdir(calib_cc_root):
+                raise ValueError("disparity directory {} not found!".format(calib_cc_root))
+
         # ----------------------------------------------------------
         # Construct list of indices for training/validation
         # ----------------------------------------------------------
@@ -60,6 +78,10 @@ class KITTI_2015_Train_Base(data.Dataset):
         else:
             raise ValueError("KITTI: dstype {} unknown!".format(dstype))
 
+        if self.verify_lidar_depth:
+            num_images = 1
+            list_of_indices = [157]
+
         # ----------------------------------------------------------
         # Save list of actual filenames for inputs and disp/flow
         # ----------------------------------------------------------
@@ -67,6 +89,11 @@ class KITTI_2015_Train_Base(data.Dataset):
         self._image_list = []
         self._flow_list = []
         self._disp_list = []
+
+        if self.verify_lidar_depth:
+            self._lidar_list = []
+            self._calib_list = []
+
         img_ext = '.jpg'
 
         for ii in list_of_indices:
@@ -85,7 +112,17 @@ class KITTI_2015_Train_Base(data.Dataset):
             disparity0_noc = os.path.join(disp0_root_noc, file_idx + "_10.png")
             disparity1_noc = os.path.join(disp1_root_noc, file_idx + "_10.png")
 
+            if self.verify_lidar_depth:
+                lidar_1 = os.path.join(lidar_root, file_idx + "_10.bin")
+                lidar_2 = os.path.join(lidar_root, file_idx + "_11.bin")
+                calib_vc = os.path.join(calib_vc_root, file_idx + ".txt")
+                calib_cc = os.path.join(calib_cc_root, file_idx + ".txt")
+
             file_list = [im_l1, im_l2, im_r1, im_r2, flow_occ, flow_noc, disparity0_occ, disparity1_occ, disparity0_noc, disparity1_noc]
+
+            if self.verify_lidar_depth:
+                file_list = [im_l1, im_l2, im_r1, im_r2, flow_occ, flow_noc, disparity0_occ, disparity1_occ, disparity0_noc, disparity1_noc, lidar_1, lidar_2, calib_vc, calib_cc]
+
             for _, item in enumerate(file_list):
                 if not os.path.isfile(item):
                     raise ValueError("File not exist: %s", item)
@@ -93,6 +130,11 @@ class KITTI_2015_Train_Base(data.Dataset):
             self._image_list.append([im_l1, im_l2, im_r1, im_r2])
             self._flow_list.append([flow_occ, flow_noc])
             self._disp_list.append([disparity0_occ, disparity1_occ, disparity0_noc, disparity1_noc])
+
+            if self.verify_lidar_depth:
+                self._lidar_list.append([lidar_1, lidar_2])
+                self._calib_list.append([calib_vc, calib_cc])
+
 
         self._size = len(self._image_list)
         assert len(self._image_list) != 0
@@ -150,6 +192,15 @@ class KITTI_2015_MonoSceneFlow(KITTI_2015_Train_Base):
         h_orig, w_orig, _ = img_list_np[0].shape
         input_im_size = torch.from_numpy(np.array([h_orig, w_orig])).float()
 
+        ### lidar and calib
+        if self.verify_lidar_depth:
+            lidar_pcls = [c3d.utils_general.load_velodyne_points(lidar) for lidar in self._lidar_list[index]]
+            calib_dict = {}
+            for calib in self._calib_list[index]:
+                calib_dict.update( c3d.utils_general.read_calib_file(calib) )
+            inex_l = c3d.utils_general.inex_from_calib_kitti(calib_dict, 2)
+            inex_r = c3d.utils_general.inex_from_calib_kitti(calib_dict, 3)
+
         # cropping 
         if self._preprocessing_crop:
 
@@ -166,12 +217,25 @@ class KITTI_2015_MonoSceneFlow(KITTI_2015_Train_Base):
             disp_list_np = kitti_crop_image_list(disp_list_np, crop_info)
             k_l1, k_r1 = kitti_adjust_intrinsic(k_l1, k_r1, crop_info)
             
+            if self.verify_lidar_depth:
+                cam_op = c3d.utils.CamCrop(int(x), int(y), int(crop_width), int(crop_height)) 
+                inex_l = inex_l.crop(cam_op)
+                inex_r = inex_r.crop(cam_op)
+
+        if self.verify_lidar_depth:
+            depth_l1 = inex_l.lidar_to_depth(lidar_pcls[0])
+            depth_l2 = inex_l.lidar_to_depth(lidar_pcls[1])
+            depth_r1 = inex_r.lidar_to_depth(lidar_pcls[0])
+            depth_r2 = inex_r.lidar_to_depth(lidar_pcls[1])
 
         # convert np to tensor
         img_list_tensor = [self._to_tensor(img) for img in img_list_np]
         flo_list_tensor = [numpy2torch(img) for img in flo_list_np]
         disp_list_tensor = [numpy2torch(img) for img in disp_list_np]
 
+        if self.verify_lidar_depth:
+            depth_list_tensor = [numpy2torch(img) for img in [depth_l1, depth_l2, depth_r1, depth_r2]]
+            depth_mask_list_tensor = [ (depth > 0).float() for depth in depth_list_tensor ]
 
         example_dict = {
             "input_l1": img_list_tensor[0],
@@ -198,6 +262,19 @@ class KITTI_2015_MonoSceneFlow(KITTI_2015_Train_Base):
             "input_k_r2": k_r1,
             "input_size": input_im_size
         }
+
+        if self.verify_lidar_depth:
+            example_dict.update({
+                "target_depth_l1": depth_list_tensor[0], 
+                "target_depth_l2": depth_list_tensor[1], 
+                "target_depth_r1": depth_list_tensor[2], 
+                "target_depth_r2": depth_list_tensor[3], 
+
+                "target_depth_mask_l1": depth_mask_list_tensor[0], 
+                "target_depth_mask_l2": depth_mask_list_tensor[1], 
+                "target_depth_mask_r1": depth_mask_list_tensor[2], 
+                "target_depth_mask_r2": depth_mask_list_tensor[3], 
+            })
 
         return example_dict
 

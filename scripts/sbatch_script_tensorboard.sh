@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name TB_FLOW_C3D
 #SBATCH --nodes=1
-#SBATCH --time=10:00:00
+#SBATCH --time=2:00:00
 #SBATCH --account=hpeng1
 ###SBATCH --partition=gpu
 #SBATCH --mail-type=END,FAILNE

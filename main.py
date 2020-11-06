@@ -36,8 +36,10 @@ def main():
     ###  while the dataset __getitem__ cannot involve GPU processing, because it will cause error in multiprocessing (when num_workers>0)
     ### But the other option is still possible, because multiprocessing can mitigate the delay. )
     if args.cuda:
-        training_augmentation = training_augmentation.cuda()
-        validation_augmentation = validation_augmentation.cuda()  
+        if training_augmentation is not None:
+            training_augmentation = training_augmentation.cuda()
+        if validation_augmentation is not None:
+            validation_augmentation = validation_augmentation.cuda()  
     ### If do the original augmentation part in the dataset, use these lines.
     # training_augmentation = None
     # validation_augmentation = None
